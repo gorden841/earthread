@@ -1,0 +1,2994 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>元素厚度·主角控制</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      user-select: none;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: #0b0e14;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
+      padding: 16px;
+    }
+    .game-container {
+      background: #1e2430;
+      padding: 20px 20px 16px;
+      border-radius: 32px;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.7);
+      position: relative;
+    }
+    canvas {
+      display: block;
+      /* 显示尺寸由 JS 自适应计算：任意屏幕比例下完整显示地图+摇杆 */
+      width: 800px;
+      height: 600px;
+      border-radius: 20px;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.06), 0 8px 24px rgba(0,0,0,0.6);
+      cursor: crosshair;
+    }
+    .controls {
+      margin-top: 16px;
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+    }
+    button {
+      background: #2c3545;
+      border: none;
+      border-bottom: 4px solid #151b24;
+      color: #eaf0fc;
+      font-weight: 600;
+      font-size: 1.1rem;
+      padding: 12px 28px;
+      border-radius: 60px;
+      letter-spacing: 0.5px;
+      cursor: pointer;
+      transition: 0.08s ease;
+      box-shadow: 0 6px 12px rgba(0,0,0,0.4);
+      flex: 0 1 auto;
+    }
+    button:active {
+      border-bottom-width: 2px;
+      transform: translateY(2px);
+      background: #202836;
+    }
+    button.special {
+      background: #5f436b;
+      border-bottom-color: #35253b;
+    }
+    button.wind-arrow {
+      background: #2e5a7a;
+      border-bottom-color: #1a354a;
+    }
+    .legend {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 12px;
+      padding: 0 8px;
+      color: #a4b3cc;
+      font-size: 0.85rem;
+      font-weight: 500;
+      letter-spacing: 0.3px;
+    }
+    .legend span {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .legend i {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border-radius: 4px;
+    }
+    .thickness-info {
+      margin-top: 10px;
+      padding: 8px 14px;
+      background: #151a23;
+      border-radius: 12px;
+      color: #8fa3c4;
+      font-size: 0.82rem;
+      text-align: center;
+      letter-spacing: 0.3px;
+    }
+    .thickness-info b {
+      color: #d9b382;
+      margin: 0 4px;
+    }
+    .thickness-info .ice-val {
+      color: #7ec8e0;
+    }
+    .thickness-info .hero-val {
+      color: #e0c878;
+    }
+    .joystick-hint {
+      position: absolute;
+      bottom: 100px;
+      left: 30px;
+      color: rgba(255,255,255,0.4);
+      font-size: 0.75rem;
+      pointer-events: none;
+      letter-spacing: 0.5px;
+    }
+  </style>
+</head>
+<body>
+<div class="game-container">
+  <canvas id="gameCanvas" width="800" height="600"></canvas>
+  <div class="joystick-hint">← 虚拟摇杆<br>长按地图拖动蓄力 · 松开发射（反向瞄准）</div>
+  <div class="controls">
+    <button class="wind-arrow" id="btnWindArrow" title="预留：后续作为技能切换按钮">🏹 风箭（技能位）</button>
+    <button class="special" id="btnReset">🔄 重置场景</button>
+  </div>
+  <div class="thickness-info">
+    元素厚度总量（守恒）：沙 <b id="totalSand">1920.0</b> · 冰 <b class="ice-val" id="totalIce">1920.0</b> ·
+    主角位置：<b class="hero-val" id="heroPos">(10, 12)</b> ·
+    脚下瓦片：沙 <b id="tileSand">5.0</b> / 冰 <b class="ice-val" id="tileIce">0.0</b>
+  </div>
+  <div class="legend">
+    <span><i style="background:#ca9a6e;"></i> 沙元素 (越厚越深)</span>
+    <span><i style="background:#7ec8e0;"></i> 冰元素 (越厚越深)</span>
+    <span><i style="background:#e0c878;"></i> 主角</span>
+    <span><i style="background:#3d2b1a;"></i> 沙虫</span>
+    <span><i style="background:#b3e4ff;"></i> 冰晶蝶</span>
+  </div>
+</div>
+
+<script src="config.js"></script>
+<script>
+  (function() {
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+
+    // 全局配置（详见 config.js）
+    const CFG = window.GAME_CONFIG;
+
+    // ------------------- 配置参数映射（修改请编辑 config.js） --------------------
+    const COLS = CFG.world.cols;
+    const ROWS = CFG.world.rows;
+    const TILE_SIZE = CFG.world.tileSize;
+
+    const BASE_THICKNESS = CFG.terrain.baseThickness;  // 初始元素厚度
+    const MAX_THICKNESS = CFG.terrain.maxThickness;    // 元素厚度上限
+
+    // ------------------- 战斗参数 --------------------
+    const HERO_MAX_HP = CFG.hero.maxHp;               // 主角最大生命
+    const HERO_INVINCIBLE_FRAMES = CFG.hero.invincibleFrames; // 受击后无敌帧
+    const ARROW_DAMAGE = CFG.windArrow.damage;        // 普通风箭伤害
+    const ARROW_PERFECT_DAMAGE = CFG.windArrow.perfectDamage; // 完美蓄力风箭伤害
+
+    const WORLD_W = COLS * TILE_SIZE;  // 世界逻辑宽度
+    const WORLD_H = ROWS * TILE_SIZE;  // 世界逻辑高度
+    let renderScale = 1;               // 渲染分辨率缩放（逻辑坐标 → 画布像素）
+
+    // 自适应显示：任意屏幕比例下完整显示地图+摇杆，并按需提升渲染分辨率
+    // 统计画布之外的界面高度（控件/信息/图例/容器内边距）。
+    // 直接测量兄弟节点，不依赖画布当前尺寸——首帧画布还是 CSS 默认 800×600，
+    // 用 container 高度减去画布高度会把首帧布局污染进结果。
+    function measureOtherHeight() {
+      const parent = canvas.parentElement;
+      const cs = getComputedStyle(parent);
+      let h = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+      for (const node of parent.children) {
+        if (node === canvas) continue;
+        const st = getComputedStyle(node);
+        if (st.position === 'absolute') continue; // 摇杆提示为绝对定位，不占布局高度
+        h += node.offsetHeight + parseFloat(st.marginTop) + parseFloat(st.marginBottom);
+      }
+      return h;
+    }
+    function resizeCanvasDisplay() {
+      const vw = document.documentElement.clientWidth || window.innerWidth;
+      const vh = document.documentElement.clientHeight || window.innerHeight;
+      const bodyPadX = 32, bodyPadY = 32; // body padding 16 × 2
+      const containerPadX = 40;           // 容器左右内边距 20 × 2
+      const availW = Math.max(200, vw - bodyPadX - containerPadX);
+      let availH = Math.max(160, vh - bodyPadY - measureOtherHeight());
+      const aspect = WORLD_W / WORLD_H;
+      let w = availW, h = w / aspect;
+      if (h > availH) { h = availH; w = h * aspect; }
+      canvas.style.width = Math.round(w) + 'px';
+      canvas.style.height = Math.round(h) + 'px';
+      // 窄屏下信息栏文字可能换行变高：强制回流后二次测量，收敛一次
+      const availH2 = Math.max(160, vh - bodyPadY - measureOtherHeight());
+      if (availH2 < h - 0.5) {
+        h = availH2; w = h * aspect;
+        canvas.style.width = Math.round(w) + 'px';
+        canvas.style.height = Math.round(h) + 'px';
+      }
+      // 渲染分辨率：随显示尺寸与设备像素比提升，上限见 config.js
+      const ratio = (w / WORLD_W) * (window.devicePixelRatio || 1);
+      renderScale = Math.min(CFG.render.maxPixelRatio, Math.max(1, ratio));
+      canvas.width = Math.round(WORLD_W * renderScale);
+      canvas.height = Math.round(WORLD_H * renderScale);
+    }
+    // 手机竖屏初次进入时，浏览器地址栏动画/布局可能在首帧之后才稳定（表现为比例失调，
+    // 横竖屏切换一次才恢复）——多监听几个时机并重算：
+    window.addEventListener('resize', resizeCanvasDisplay);
+    window.addEventListener('pageshow', resizeCanvasDisplay);
+    // orientationchange 触发瞬间部分安卓机 innerWidth/Height 还是旧值，延迟到下一帧再测
+    window.addEventListener('orientationchange', () => {
+      requestAnimationFrame(() => requestAnimationFrame(resizeCanvasDisplay));
+      setTimeout(resizeCanvasDisplay, 200);
+    });
+    if (window.visualViewport) window.visualViewport.addEventListener('resize', resizeCanvasDisplay);
+    window.addEventListener('load', () => {
+      requestAnimationFrame(resizeCanvasDisplay);
+      setTimeout(resizeCanvasDisplay, 300);
+    });
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(resizeCanvasDisplay);
+    // 首帧后补算两次，兜住移动端布局延迟
+    requestAnimationFrame(() => requestAnimationFrame(resizeCanvasDisplay));
+    setTimeout(resizeCanvasDisplay, 350);
+
+    // 瓦片数据
+    let tiles = [];
+    // 怪物数据
+    let monsters = [];
+    // 主角
+    let hero = null;
+    // 粒子系统
+    let particles = [];
+    // 风箭
+    let windArrows = [];
+    // 敌方远程攻击弹道（冰晶蝶冰刺）
+    let enemyProjectiles = [];
+    // 天降冰锥（落点警示 + 下落 + 落地结算）
+    let iceSpikes = [];
+    // 游戏是否结束（主角阵亡）
+    let gameOver = false;
+    // 调试选项：URL 带 ?debug=1 时主角血量扣完不会死亡（便于调试观察；正常打开不受影响）
+    const DEBUG_NO_DEATH = /[?&]debug=1/.test(location.search);
+    if (DEBUG_NO_DEATH) console.log('[调试模式] 主角血量扣完不会死亡（?debug=1）');
+    // 蓄力状态
+    const charge = {
+      active: false,      // 是否正在蓄力
+      progress: 0,        // 蓄力进度 0~1
+      duration: 48,       // 蓄力总帧数（60帧 ≈ 1秒，60fps）
+      ready: false,       // 是否已蓄满
+      readyBursted: false,// 蓄力完成的爆发特效是否已播放
+      readyFrames: 0,     // 蓄满后经过的帧数（用于完美蓄力窗口判断）
+    };
+    // 动画帧
+    let animationFrame = null;
+
+    // 虚拟摇杆状态
+    const joystick = {
+      baseX: CFG.joystick.baseX,
+      baseY: CFG.joystick.baseY,
+      baseRadius: CFG.joystick.baseRadius,
+      knobRadius: CFG.joystick.knobRadius,
+      knobX: CFG.joystick.baseX,
+      knobY: CFG.joystick.baseY,
+      active: false,
+      pointerId: null,
+      // 输出方向 (-1 ~ 1)
+      dx: 0,
+      dy: 0,
+    };
+
+    // 键盘状态
+    const keys = {};
+
+    // 蓄力瞄准状态（长按场景任意处拖动）
+    const aim = {
+      active: false,         // 是否正在长按瞄准
+      pointerId: null,       // 触发瞄准的指针/手指
+      startX: 0, startY: 0,  // 长按起点
+      curX: 0, curY: 0,      // 当前拖动点
+    };
+
+    // ------------------- 初始化地形 --------------------
+    function initTiles() {
+      tiles = [];
+      for (let r = 0; r < ROWS; r++) {
+        let row = [];
+        for (let c = 0; c < COLS; c++) {
+          const isSand = (c < COLS / 2);
+          row.push({
+            sand: isSand ? BASE_THICKNESS : 0,
+            ice: isSand ? 0 : BASE_THICKNESS,
+            seed: Math.random() * 100,
+          });
+        }
+        tiles.push(row);
+      }
+      updateTotalInfo();
+    }
+
+    // ------------------- 全局元素总量 --------------------
+    function getTotalThickness() {
+      let totalSand = 0, totalIce = 0;
+      for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+          totalSand += tiles[r][c].sand;
+          totalIce += tiles[r][c].ice;
+        }
+      }
+      return { totalSand, totalIce };
+    }
+
+    function updateTotalInfo() {
+      const { totalSand, totalIce } = getTotalThickness();
+      document.getElementById('totalSand').textContent = totalSand.toFixed(1);
+      document.getElementById('totalIce').textContent = totalIce.toFixed(1);
+    }
+
+    function updateHeroInfo() {
+      if (!hero) return;
+      const col = Math.floor(hero.x / TILE_SIZE);
+      const row = Math.floor(hero.y / TILE_SIZE);
+      document.getElementById('heroPos').textContent = `(${col}, ${row})`;
+      if (row >= 0 && row < ROWS && col >= 0 && col < COLS) {
+        const tile = tiles[row][col];
+        document.getElementById('tileSand').textContent = tile.sand.toFixed(1);
+        document.getElementById('tileIce').textContent = tile.ice.toFixed(1);
+      }
+    }
+
+    // ------------------- 初始化怪物 --------------------
+    function initMonsters() {
+      const sw = CFG.sandworm;
+      const fly = CFG.icefly;
+      const shared = CFG.monsterShared;
+      monsters = [
+        {
+          id: 'sandworm',
+          name: '沙虫',
+          x: 7 * TILE_SIZE + TILE_SIZE / 2,
+          y: 15 * TILE_SIZE + TILE_SIZE / 2,
+          type: 'sandworm',
+          size: sw.size,
+          // 生命
+          maxHp: sw.hp,
+          hp: sw.hp,
+          // 追踪与近战攻击
+          moveSpeed: sw.moveSpeed,
+          attackRange: sw.attackRange,
+          attackWindup: 0,          // 攻击前摇剩余帧（>0 表示正在蓄力）
+          attackWindupMax: sw.attackWindupMax,
+          attackCooldown: sw.firstAttackDelay,
+          attackCooldownMax: sw.attackCooldownMax,
+          hitFlash: 0,              // 受击闪白剩余帧
+          element: sw.element,      // 元素属性（免疫同元素地形扩散伤害）
+          erodedSand: 0,            // 本次前摇已侵蚀的沙厚度（作为攻击加伤来源）
+          erodedIce: 0,             // 本次前摇已侵蚀的冰厚度
+          pendingDamage: 0,         // 前摇结束结算出的本次攻击伤害
+          attackCounter: 0,         // 攻击计数（用于模组轮换）
+          attackKind: 'lunge',      // 当前攻击模组：lunge 突进 / nova 沙暴新星
+          // 潜沙突袭状态
+          lungeFrames: 0,   // 突进剩余帧（>0 表示正在突进）
+          lungeVx: 0,
+          lungeVy: 0,
+          lungeDirX: 1,     // 前摇开始时锁定的突进方向
+          lungeDirY: 0,
+          lungeHitDone: false, // 本次突进是否已命中过（防止一次突进多次结算）
+          // 击退速度
+          vx: 0,
+          vy: 0,
+          knockbackFriction: shared.knockbackFriction,
+        },
+        {
+          id: 'icefly',
+          name: '冰晶蝶',
+          x: 24 * TILE_SIZE + TILE_SIZE / 2,
+          y: 8 * TILE_SIZE + TILE_SIZE / 2,
+          type: 'icefly',
+          size: fly.size,
+          // 生命
+          maxHp: fly.hp,
+          hp: fly.hp,
+          // 追踪与远程攻击（保持距离，发射冰刺）
+          moveSpeed: fly.moveSpeed,
+          preferredRange: fly.preferredRange,
+          boltSpeed: fly.boltSpeed,
+          attackWindup: 0,
+          attackWindupMax: fly.attackWindupMax,
+          attackCooldown: fly.firstAttackDelay,
+          attackCooldownMax: fly.attackCooldownMax,
+          hitFlash: 0,
+          element: fly.element,     // 元素属性（免疫同元素地形扩散伤害）
+          erodedSand: 0,            // 本次前摇已侵蚀的沙厚度（作为攻击加伤来源）
+          erodedIce: 0,             // 本次前摇已侵蚀的冰厚度
+          pendingDamage: 0,         // 前摇结束结算出的本次攻击伤害
+          attackCounter: 0,         // 攻击计数（用于模组轮换）
+          attackKind: 'fan',        // 当前攻击模组：fan 扇形散射 / spike 天降冰锥
+          // 悬浮动画
+          floatPhase: Math.random() * Math.PI * 2,
+          // 击退速度
+          vx: 0,
+          vy: 0,
+          knockbackFriction: shared.knockbackFriction,
+        },
+      ];
+    }
+
+    // ------------------- 怪物 AI（追踪 + 攻击） --------------------
+    function updateMonsters() {
+      if (!hero || gameOver) return;
+
+      monsters.forEach(mon => {
+        // 计时器
+        if (mon.hitFlash > 0) mon.hitFlash--;
+        if (mon.attackCooldown > 0) mon.attackCooldown--;
+        if (mon.type === 'icefly') mon.floatPhase += CFG.icefly.floatPhaseSpeed;
+
+        const dx = hero.x - mon.x;
+        const dy = hero.y - mon.y;
+        const dist = Math.hypot(dx, dy) || 0.001;
+        const dirX = dx / dist;
+        const dirY = dy / dist;
+
+        // 击退位移与衰减
+        const kbSpeed = Math.hypot(mon.vx, mon.vy);
+        mon.x += mon.vx;
+        mon.y += mon.vy;
+        mon.vx *= mon.knockbackFriction;
+        mon.vy *= mon.knockbackFriction;
+        if (Math.abs(mon.vx) < 0.02) mon.vx = 0;
+        if (Math.abs(mon.vy) < 0.02) mon.vy = 0;
+
+        // 强击退中：无法行动，并打断正在进行的攻击前摇/突进
+        if (kbSpeed >= CFG.monsterShared.kbInterruptSpeed) {
+          mon.attackWindup = 0;
+          // 被打断时把已侵蚀的元素归还到怪物周围（避免元素凭空消失）
+          if (mon.erodedSand + mon.erodedIce > 0.01) {
+            pileElementAround(mon.x, mon.y, mon.erodedSand, mon.erodedIce, CFG.monsterShared.attackPileRadius);
+            mon.erodedSand = 0;
+            mon.erodedIce = 0;
+          }
+          if (mon.lungeFrames > 0) {
+            mon.lungeFrames = 0;
+            mon.attackCooldown = mon.attackCooldownMax;
+          }
+        } else if (mon.type === 'sandworm') {
+          updateSandwormAI(mon, dirX, dirY, dist);
+        } else if (mon.type === 'icefly') {
+          updateIceflyAI(mon, dirX, dirY, dist);
+        }
+
+        // 边界限制
+        const halfSize = TILE_SIZE * mon.size * 0.4;
+        mon.x = Math.max(halfSize, Math.min(COLS * TILE_SIZE - halfSize, mon.x));
+        mon.y = Math.max(halfSize, Math.min(ROWS * TILE_SIZE - halfSize, mon.y));
+      });
+
+      // 怪物之间简易分离，避免完全重叠
+      for (let i = 0; i < monsters.length; i++) {
+        for (let j = i + 1; j < monsters.length; j++) {
+          const a = monsters[i], b = monsters[j];
+          const ddx = b.x - a.x, ddy = b.y - a.y;
+          const d = Math.hypot(ddx, ddy);
+          const minDist = TILE_SIZE * (a.size + b.size) * CFG.monsterShared.separationDistFactor;
+          if (d > 0.01 && d < minDist) {
+            const push = (minDist - d) * CFG.monsterShared.separationPush;
+            const ux = ddx / d, uy = ddy / d;
+            a.x -= ux * push; a.y -= uy * push;
+            b.x += ux * push; b.y += uy * push;
+          }
+        }
+      }
+    }
+
+    // ------------------- 怪物攻击的地形侵蚀机制 --------------------
+    // 攻击前摇期间：怪物只从周围瓦片抽取自身对应元素的厚度，累积到自身（作为攻击加伤来源）
+    function drainTerrainAround(mon) {
+      const cfg = mon.type === 'sandworm' ? CFG.sandworm : CFG.icefly;
+      const elemKey = cfg.element; // 只侵蚀自身对应元素（sand/ice）
+      const rate = cfg.attackErodeTotal / (mon.windupTotal || mon.attackWindupMax || 1);
+      const R = cfg.attackErodeRadius; // 侵蚀半径（格）
+      const col = Math.floor(mon.x / TILE_SIZE);
+      const row = Math.floor(mon.y / TILE_SIZE);
+      const rInt = Math.ceil(R);
+      let remaining = rate;
+      let drained = false;
+
+      for (let tries = 0; tries < 8 && remaining > 0.001; tries++) {
+        const dc = Math.floor(Math.random() * (2 * rInt + 1)) - rInt;
+        const dr = Math.floor(Math.random() * (2 * rInt + 1)) - rInt;
+        if (dc * dc + dr * dr > R * R) continue; // 圆形范围
+        // 距离衰减：越靠近怪物中心越容易被侵蚀（中心权重 1 → 边缘 1-falloff）
+        const dist = Math.hypot(dc, dr);
+        if (Math.random() > 1 - (dist / R) * CFG.monsterShared.distanceFalloff) continue;
+        const c = col + dc, r = row + dr;
+        if (r < 0 || r >= ROWS || c < 0 || c >= COLS) continue;
+        const tile = tiles[r][c];
+        const avail = tile[elemKey];
+        if (avail <= 0.001) continue; // 该瓦片没有怪物对应元素，无法侵蚀
+
+        const take = Math.min(remaining, avail);
+        tile[elemKey] = Math.max(0, avail - take);
+        if (elemKey === 'sand') mon.erodedSand += take;
+        else mon.erodedIce += take;
+        remaining -= take;
+        drained = true;
+
+        // 元素被抽离的粒子：从瓦片飘向怪物
+        const px = c * TILE_SIZE + TILE_SIZE / 2;
+        const py = r * TILE_SIZE + TILE_SIZE / 2;
+        particles.push({
+          x: px, y: py,
+          vx: (mon.x - px) * 0.08 + (Math.random() - 0.5) * 0.4,
+          vy: (mon.y - py) * 0.08 + (Math.random() - 0.5) * 0.4,
+          size: 1.5 + Math.random() * 1.5,
+          color: elemKey === 'sand' ? 'rgba(210, 170, 110, 0.85)' : 'rgba(180, 230, 255, 0.85)',
+          life: 10 + Math.random() * 6,
+          maxLife: 16,
+          gravity: 0,
+          fade: true,
+          alpha: 1.0,
+        });
+      }
+      if (drained) updateTotalInfo();
+    }
+
+    // 将元素厚度堆积到指定点附近的瓦片（攻击释放时堆积到玩家附近 / 被打断时归还怪物周围）
+    function pileElementAround(px, py, sandAmt, iceAmt, radiusTiles) {
+      if (sandAmt <= 0.001 && iceAmt <= 0.001) return;
+      const col = Math.floor(px / TILE_SIZE);
+      const row = Math.floor(py / TILE_SIZE);
+      const rInt = Math.ceil(radiusTiles);
+      const list = [];
+      for (let dr = -rInt; dr <= rInt; dr++) {
+        for (let dc = -rInt; dc <= rInt; dc++) {
+          if (dc * dc + dr * dr > radiusTiles * radiusTiles) continue;
+          const c = col + dc, r = row + dr;
+          if (r < 0 || r >= ROWS || c < 0 || c >= COLS) continue;
+          list.push({ t: tiles[r][c], x: c * TILE_SIZE + TILE_SIZE / 2, y: r * TILE_SIZE + TILE_SIZE / 2 });
+        }
+      }
+      if (list.length === 0) return;
+
+      const applyElement = (element, amount) => {
+        if (amount <= 0.001) return;
+        // 距离衰减：越靠近堆积中心（玩家/怪物中心）堆得越多
+        const weights = list.map(p => {
+          const d = Math.hypot(p.x - px, p.y - py) / TILE_SIZE;
+          return Math.max(0.1, 1 - (d / radiusTiles) * CFG.monsterShared.distanceFalloff);
+        });
+        const wSum = weights.reduce((a, b) => a + b, 0);
+        let distributed = 0;
+        list.forEach((p, i) => {
+          const gain = Math.min(amount * weights[i] / wSum, MAX_THICKNESS - p.t[element]);
+          if (gain > 0) { p.t[element] += gain; distributed += gain; }
+        });
+        // 上限导致的余量二次分配（半径内）
+        const remaining = amount - distributed;
+        if (remaining > 0.01) {
+          const can = list.filter(p => p.t[element] < MAX_THICKNESS - 0.01);
+          if (can.length > 0) {
+            const per2 = remaining / can.length;
+            can.forEach(p => {
+              const gain = Math.min(per2, MAX_THICKNESS - p.t[element]);
+              p.t[element] += gain;
+              distributed += gain;
+            });
+          }
+        }
+        // 全局兜底：半径内全部饱和时，余量分配到全图仍有容量的瓦片（保持总量严格守恒）
+        const leftover = amount - distributed;
+        if (leftover > 0.01) {
+          const global = [];
+          for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+            if (tiles[r][c][element] < MAX_THICKNESS - 0.01) global.push(tiles[r][c]);
+          }
+          if (global.length > 0) {
+            const per3 = leftover / global.length;
+            global.forEach(t => {
+              t[element] += Math.min(per3, MAX_THICKNESS - t[element]);
+            });
+          }
+        }
+      };
+      applyElement('sand', sandAmt);
+      applyElement('ice', iceAmt);
+
+      // 堆积可见反馈：少量元素粒子从空中落到堆积区
+      const color = sandAmt >= iceAmt ? 'rgba(210, 170, 110, 0.8)' : 'rgba(180, 230, 255, 0.8)';
+      for (let i = 0; i < Math.min(5, list.length); i++) {
+        const p = list[Math.floor(Math.random() * list.length)];
+        particles.push({
+          x: p.x + (Math.random() - 0.5) * TILE_SIZE,
+          y: p.y - 14 - Math.random() * 10,
+          vx: 0,
+          vy: 1.2,
+          size: 1.5 + Math.random() * 1.5,
+          color: color,
+          life: 12 + Math.random() * 6,
+          maxLife: 18,
+          gravity: 0,
+          fade: true,
+          alpha: 1.0,
+        });
+      }
+      updateTotalInfo();
+    }
+
+    // 攻击释放瞬间：基础伤害 + 侵蚀加伤 = 本次攻击伤害，并把侵蚀的元素堆积到玩家附近
+    function settleAttackErosion(mon) {
+      const cfg = mon.type === 'sandworm' ? CFG.sandworm : CFG.icefly;
+      mon.pendingDamage = Math.round(cfg.attackBaseDamage + (mon.erodedSand + mon.erodedIce) * cfg.attackDamagePerEroded);
+      pileElementAround(hero.x, hero.y, mon.erodedSand, mon.erodedIce, CFG.monsterShared.attackPileRadius);
+      mon.erodedSand = 0;
+      mon.erodedIce = 0;
+    }
+
+    // 沙虫「潜沙突袭 / 沙暴新星」：缓慢逼近 → 蓄力（两种模组预警不同）→ 突进扑咬 / 环形沙暴
+    function updateSandwormAI(mon, dirX, dirY, dist) {
+      // 突进阶段：高速位移，途中触碰主角则造成伤害
+      if (mon.lungeFrames > 0) {
+        mon.lungeFrames--;
+        mon.x += mon.lungeVx;
+        mon.y += mon.lungeVy;
+        // 突进拖尾沙尘
+        spawnSandDust(mon.x, mon.y, 0.25);
+        if (!mon.lungeHitDone &&
+            Math.hypot(hero.x - mon.x, hero.y - mon.y) < CFG.sandworm.lungeHitRadius) {
+          mon.lungeHitDone = true;
+          damageHero(mon.pendingDamage, mon.x, mon.y);
+          spawnSandDust(hero.x, hero.y, 0.9);
+        }
+        if (mon.lungeFrames === 0) {
+          // 落点沙泉爆发
+          spawnSandDust(mon.x, mon.y, 1.3);
+          mon.attackCooldown = mon.attackCooldownMax;
+        }
+        return;
+      }
+
+      // 前摇蓄力阶段：持续从周围瓦片侵蚀自身元素（本次攻击 = 基础伤害 + 侵蚀加伤）
+      if (mon.attackWindup > 0) {
+        drainTerrainAround(mon);
+        if (mon.attackKind === 'nova') {
+          // 沙暴新星：大范围沙粒从四周吸入
+          mon.attackWindup--;
+          for (let k = 0; k < 2; k++) {
+            if (Math.random() < 0.8) {
+              const ang = Math.random() * Math.PI * 2;
+              const r = CFG.sandworm.novaRadius * (0.7 + Math.random() * 0.6);
+              const px = mon.x + Math.cos(ang) * r;
+              const py = mon.y + Math.sin(ang) * r;
+              particles.push({
+                x: px, y: py,
+                vx: (mon.x - px) * 0.07 - Math.sin(ang) * 1.5,
+                vy: (mon.y - py) * 0.07 + Math.cos(ang) * 1.5,
+                size: 1.5 + Math.random() * 2.2,
+                color: `rgba(217, 179, 130, ${0.6 + Math.random() * 0.3})`,
+                life: 12 + Math.random() * 8,
+                maxLife: 20,
+                gravity: 0,
+                fade: true,
+                alpha: 1.0,
+              });
+            }
+          }
+          if (mon.attackWindup === 0) {
+            settleAttackErosion(mon);
+            triggerSandNova(mon);
+            mon.attackCooldown = mon.attackCooldownMax;
+          }
+        } else {
+          // 潜沙突袭：第一帧锁定方向，沙粒向身体回旋吸入
+          if (mon.attackWindup === mon.attackWindupMax) {
+            mon.lungeDirX = dirX;
+            mon.lungeDirY = dirY;
+          }
+          mon.attackWindup--;
+          // 回旋吸入的沙粒
+          if (Math.random() < 0.6) {
+            const ang = Math.random() * Math.PI * 2;
+            const r = 26 + Math.random() * 18;
+            const px = mon.x + Math.cos(ang) * r;
+            const py = mon.y + Math.sin(ang) * r;
+            particles.push({
+              x: px, y: py,
+              vx: (mon.x - px) * 0.09 - Math.sin(ang) * 1.2,
+              vy: (mon.y - py) * 0.09 + Math.cos(ang) * 1.2,
+              size: 1.5 + Math.random() * 2,
+              color: `rgba(217, 179, 130, ${0.6 + Math.random() * 0.3})`,
+              life: 12 + Math.random() * 8,
+              maxLife: 20,
+              gravity: 0,
+              fade: true,
+              alpha: 1.0,
+            });
+          }
+          if (mon.attackWindup === 0) {
+            // 前摇结束：结算侵蚀伤害，朝锁定方向突进
+            settleAttackErosion(mon);
+            const spd = CFG.sandworm.lungeDistance / CFG.sandworm.lungeFrames;
+            mon.lungeVx = mon.lungeDirX * spd;
+            mon.lungeVy = mon.lungeDirY * spd;
+            mon.lungeFrames = CFG.sandworm.lungeFrames;
+            mon.lungeHitDone = false;
+          }
+        }
+        return;
+      }
+
+      // 常态追踪：进入攻击距离则开始蓄力（按轮换选择模组）
+      if (dist <= mon.attackRange && mon.attackCooldown <= 0) {
+        mon.attackCounter++;
+        if (mon.attackCounter % CFG.sandworm.novaEvery === 0) {
+          mon.attackKind = 'nova';
+          mon.attackWindup = CFG.sandworm.novaWindupMax; // 新星前摇更长
+          mon.windupTotal = CFG.sandworm.novaWindupMax;
+        } else {
+          mon.attackKind = 'lunge';
+          mon.attackWindup = mon.attackWindupMax;
+          mon.windupTotal = mon.attackWindupMax;
+        }
+      } else if (dist > mon.attackRange - CFG.sandworm.approachStopGap) {
+        mon.x += dirX * mon.moveSpeed;
+        mon.y += dirY * mon.moveSpeed;
+      }
+    }
+
+    // 沙暴新星：以自身为中心的环形沙暴爆发
+    function triggerSandNova(mon) {
+      const R = CFG.sandworm.novaRadius;
+      // 环形沙暴粒子（向外高速扩散）
+      const count = CFG.sandworm.novaBurstParticles;
+      for (let i = 0; i < count; i++) {
+        const ang = (i / count) * Math.PI * 2 + Math.random() * 0.2;
+        const spd = 4 + Math.random() * 2.5;
+        particles.push({
+          x: mon.x,
+          y: mon.y,
+          vx: Math.cos(ang) * spd,
+          vy: Math.sin(ang) * spd,
+          size: 2 + Math.random() * 2.5,
+          color: `rgba(217, 179, 130, ${0.7 + Math.random() * 0.3})`,
+          life: 16 + Math.random() * 8,
+          maxLife: 24,
+          gravity: 0,
+          fade: true,
+          alpha: 1.0,
+        });
+      }
+      // 中心沙柱
+      spawnSandDust(mon.x, mon.y, 1.6);
+      // 命中判定：仍在半径内则受伤
+      if (Math.hypot(hero.x - mon.x, hero.y - mon.y) <= R) {
+        damageHero(mon.pendingDamage, mon.x, mon.y);
+      }
+    }
+
+    // 冰晶蝶「扇形冰晶散射 / 天降冰锥」：保持中距离盘旋 → 前摇凝聚 → 扇形齐射 / 锁定落点降冰锥
+    function updateIceflyAI(mon, dirX, dirY, dist) {
+      if (mon.attackWindup > 0) {
+        drainTerrainAround(mon); // 前摇只侵蚀自身元素瓦片（加伤来源，伤害有基础保底）
+        mon.attackWindup--;
+        // 前摇粒子：散射=冰晶环绕内聚（预告弹幕数）；冰锥=寒气上升（预告落点）
+        if (mon.attackWindup % 4 === 0) {
+          const t = mon.attackWindup / (mon.windupTotal || mon.attackWindupMax); // 1 → 0
+          if (mon.attackKind === 'spike') {
+            for (let k = 0; k < 2; k++) {
+              particles.push({
+                x: mon.x + (Math.random() - 0.5) * 18,
+                y: mon.y + 8,
+                vx: (Math.random() - 0.5) * 0.3,
+                vy: -(1.5 + Math.random() * 1.5),
+                size: 1.5 + Math.random() * 1.5,
+                color: 'rgba(200, 240, 255, 0.8)',
+                life: 12 + Math.random() * 5,
+                maxLife: 17,
+                gravity: 0,
+                fade: true,
+                alpha: 1.0,
+              });
+            }
+          } else {
+            const count = CFG.icefly.boltCount;
+            for (let k = 0; k < count; k++) {
+              const baseA = (k / count) * Math.PI * 2 + mon.floatPhase;
+              const r = 10 + t * 20;
+              particles.push({
+                x: mon.x + Math.cos(baseA) * r,
+                y: mon.y + Math.sin(baseA) * r - 6,
+                vx: -Math.cos(baseA) * 0.8,
+                vy: -Math.sin(baseA) * 0.8,
+                size: 1.8 + Math.random() * 1.2,
+                color: 'rgba(200, 240, 255, 0.85)',
+                life: 10 + Math.random() * 4,
+                maxLife: 14,
+                gravity: 0,
+                fade: true,
+                alpha: 1.0,
+              });
+            }
+          }
+        }
+        if (mon.attackWindup === 0) {
+          settleAttackErosion(mon);
+          if (mon.attackKind === 'spike') {
+            castIceSpike(mon);
+          } else {
+            fireIceBolt(mon, dirX, dirY);
+          }
+          mon.attackCooldown = mon.attackCooldownMax;
+        }
+        return;
+      }
+      // 距离调整：太远接近，太近后撤，合适距离则侧向盘旋
+      if (dist > mon.preferredRange + CFG.icefly.approachGap) {
+        mon.x += dirX * mon.moveSpeed;
+        mon.y += dirY * mon.moveSpeed;
+      } else if (dist < mon.preferredRange - CFG.icefly.retreatGap) {
+        mon.x -= dirX * mon.moveSpeed * CFG.icefly.retreatSpeedMul;
+        mon.y -= dirY * mon.moveSpeed * CFG.icefly.retreatSpeedMul;
+      } else {
+        mon.x += -dirY * mon.moveSpeed * CFG.icefly.orbitSpeedMul;
+        mon.y += dirX * mon.moveSpeed * CFG.icefly.orbitSpeedMul;
+      }
+      // 进入射程且冷却结束 → 开始攻击前摇（按轮换选择模组）
+      if (mon.attackCooldown <= 0 && dist < mon.preferredRange + CFG.icefly.attackDetectExtra) {
+        mon.attackCounter++;
+        if (mon.attackCounter % CFG.icefly.spikeEvery === 0) {
+          mon.attackKind = 'spike';
+        } else {
+          mon.attackKind = 'fan';
+        }
+        mon.attackWindup = mon.attackWindupMax;
+        mon.windupTotal = mon.attackWindupMax;
+      }
+    }
+
+    // 天降冰锥：锁定主角当前位置，警示圈停留后冰锥落下
+    function castIceSpike(mon) {
+      iceSpikes.push({
+        x: hero.x,
+        y: hero.y,
+        radius: CFG.icefly.spikeRadius,
+        delay: CFG.icefly.spikeDelay,     // 警示圈剩余帧
+        fall: CFG.icefly.spikeFallFrames, // 下落剩余帧（delay 结束后开始）
+        fallTotal: CFG.icefly.spikeFallFrames,
+        damage: mon.pendingDamage,
+      });
+      // 施法点微光
+      spawnIceShards(mon.x, mon.y, 0.6);
+    }
+
+    // 更新天降冰锥
+    function updateIceSpikes() {
+      for (let i = iceSpikes.length - 1; i >= 0; i--) {
+        const s = iceSpikes[i];
+        if (s.delay > 0) {
+          s.delay--;
+          continue;
+        }
+        if (s.fall > 0) {
+          s.fall--;
+          if (s.fall > 0) continue;
+          // 落地瞬间：命中判定 + 冰屑爆发
+          spawnIceShards(s.x, s.y, 1.8);
+          if (!gameOver && Math.hypot(hero.x - s.x, hero.y - s.y) <= s.radius) {
+            damageHero(s.damage, s.x, s.y);
+          }
+          iceSpikes.splice(i, 1);
+          continue;
+        }
+        iceSpikes.splice(i, 1);
+      }
+    }
+
+    // 绘制天降冰锥（警示圈 + 下落中的冰锥）
+    function drawIceSpikes() {
+      iceSpikes.forEach(s => {
+        if (s.delay > 0) {
+          // 地面警示圈：红色填充 + 冰蓝描边，内圈随时间收缩提示剩余时间
+          const t = 1 - s.delay / CFG.icefly.spikeDelay; // 0→1
+          ctx.fillStyle = `rgba(255, 80, 80, ${0.12 + t * 0.15})`;
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, s.radius, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(255, 100, 100, 0.8)';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, s.radius, 0, Math.PI * 2);
+          ctx.stroke();
+          // 收缩内圈 = 剩余时间
+          ctx.strokeStyle = 'rgba(190, 235, 255, 0.9)';
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, Math.max(2, s.radius * (1 - t)), 0, Math.PI * 2);
+          ctx.stroke();
+        } else if (s.fall > 0) {
+          // 冰锥下落：从高空坠下（高度随 fall 递减），地面投影随落地变大
+          const t = 1 - s.fall / s.fallTotal; // 0→1
+          const h = (1 - t) * 160;            // 剩余高度
+          const gy = s.y - h;
+          // 地面投影
+          ctx.fillStyle = `rgba(30, 60, 80, ${0.15 + t * 0.3})`;
+          ctx.beginPath();
+          ctx.ellipse(s.x, s.y + 4, 8 + t * 12, 3 + t * 4, 0, 0, Math.PI * 2);
+          ctx.fill();
+          // 锥体（拉长菱形，尖端朝下）
+          ctx.save();
+          ctx.translate(s.x, gy);
+          ctx.shadowColor = 'rgba(160, 220, 255, 0.9)';
+          ctx.shadowBlur = 14;
+          ctx.fillStyle = '#c8ecff';
+          ctx.beginPath();
+          ctx.moveTo(0, 22);           // 尖端
+          ctx.lineTo(-8, -6);
+          ctx.lineTo(0, -16);
+          ctx.lineTo(8, -6);
+          ctx.closePath();
+          ctx.fill();
+          ctx.shadowBlur = 0;
+          ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+          ctx.beginPath();
+          ctx.moveTo(0, 22);
+          ctx.lineTo(-3, -4);
+          ctx.lineTo(0, -10);
+          ctx.closePath();
+          ctx.fill();
+          ctx.restore();
+        }
+      });
+    }
+
+    // 冰晶蝶发射冰刺：扇形齐射（中心对准主角，两侧按 boltSpreadDeg 展开）
+    function fireIceBolt(mon, dirX, dirY) {
+      const count = CFG.icefly.boltCount || 1;
+      const spreadRad = (CFG.icefly.boltSpreadDeg || 0) * Math.PI / 180;
+      const baseAngle = Math.atan2(dirY, dirX);
+      for (let i = 0; i < count; i++) {
+        const t = count === 1 ? 0 : (i / (count - 1) - 0.5); // -0.5 ~ 0.5
+        const a = baseAngle + t * spreadRad + (Math.random() - 0.5) * 0.04;
+        const spd = mon.boltSpeed * (0.92 + Math.random() * 0.16);
+        enemyProjectiles.push({
+          x: mon.x,
+          y: mon.y - 6,
+          vx: Math.cos(a) * spd,
+          vy: Math.sin(a) * spd,
+          life: CFG.enemyBolt.maxLife,
+          damage: mon.pendingDamage,
+        });
+      }
+      // 发射点微光粒子（数量随弹道数增加）
+      const sparkCount = Math.round(CFG.enemyBolt.launchSparks * (count > 1 ? 1.5 : 1));
+      for (let i = 0; i < sparkCount; i++) {
+        const angle = Math.atan2(dirY, dirX) + (Math.random() - 0.5) * 1.2;
+        const spd = 1 + Math.random() * 1.5;
+        particles.push({
+          x: mon.x,
+          y: mon.y - 6,
+          vx: Math.cos(angle) * spd,
+          vy: Math.sin(angle) * spd,
+          size: 1.5 + Math.random() * 2,
+          color: `rgba(200, 240, 255, ${0.7 + Math.random() * 0.3})`,
+          life: 10 + Math.random() * 8,
+          maxLife: 18,
+          gravity: 0,
+          fade: true,
+          alpha: 1.0,
+        });
+      }
+    }
+
+    // 更新敌方弹道
+    function updateEnemyProjectiles() {
+      if (!hero) return;
+      for (let i = enemyProjectiles.length - 1; i >= 0; i--) {
+        const p = enemyProjectiles[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        p.life--;
+
+        // 拖尾粒子
+        if (Math.random() < CFG.enemyBolt.trailChance) {
+          particles.push({
+            x: p.x,
+            y: p.y,
+            vx: -p.vx * 0.15 + (Math.random() - 0.5) * 0.3,
+            vy: -p.vy * 0.15 + (Math.random() - 0.5) * 0.3,
+            size: 1 + Math.random() * 1.5,
+            color: 'rgba(180, 230, 255, 0.6)',
+            life: 8 + Math.random() * 6,
+            maxLife: 14,
+            gravity: 0,
+            fade: true,
+            alpha: 1.0,
+          });
+        }
+
+        // 命中主角
+        if (!gameOver && Math.hypot(hero.x - p.x, hero.y - p.y) < CFG.enemyBolt.hitRadius) {
+          damageHero(p.damage, p.x, p.y);
+          spawnIceShards(hero.x, hero.y, 0.9);
+          enemyProjectiles.splice(i, 1);
+          continue;
+        }
+
+        // 未命中主角：飞出边界或耗尽时，在飞行终点（钳制回世界内）侵蚀+堆积（总量守恒）
+        if (p.x < 0 || p.x > WORLD_W || p.y < 0 || p.y > WORLD_H || p.life <= 0) {
+          const len = Math.hypot(p.vx, p.vy) || 1;
+          const ex = Math.max(0, Math.min(WORLD_W, p.x));
+          const ey = Math.max(0, Math.min(WORLD_H, p.y));
+          applyWindArrowDiffusion(ex, ey, p.vx / len, p.vy / len, CFG.enemyBolt.missEdgeSpreadMul);
+          enemyProjectiles.splice(i, 1);
+        }
+      }
+    }
+
+    // ------------------- 伤害结算 --------------------
+    // 主角受伤
+    function damageHero(amount, sourceX, sourceY) {
+      if (gameOver || !hero || hero.invincibleFrames > 0) return;
+      hero.hp = Math.max(0, hero.hp - amount);
+      hero.invincibleFrames = HERO_INVINCIBLE_FRAMES;
+      hero.hurtFlash = CFG.hero.hurtFlashFrames;
+
+      // 受击击退
+      const dx = hero.x - sourceX;
+      const dy = hero.y - sourceY;
+      const d = Math.hypot(dx, dy) || 1;
+      hero.kbVx = (dx / d) * CFG.hero.hurtKnockbackSpeed;
+      hero.kbVy = (dy / d) * CFG.hero.hurtKnockbackSpeed;
+
+      // 红色受击粒子
+      for (let i = 0; i < CFG.hero.hurtParticles; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const spd = 1 + Math.random() * 2.5;
+        particles.push({
+          x: hero.x,
+          y: hero.y,
+          vx: Math.cos(angle) * spd,
+          vy: Math.sin(angle) * spd,
+          size: 1.5 + Math.random() * 2,
+          color: `rgba(255, 90, 90, ${0.7 + Math.random() * 0.3})`,
+          life: 14 + Math.random() * 10,
+          maxLife: 24,
+          gravity: 0,
+          fade: true,
+          alpha: 1.0,
+        });
+      }
+
+      if (hero.hp <= 0 && !DEBUG_NO_DEATH) {
+        gameOver = true;
+        // 阵亡爆发
+        for (let i = 0; i < CFG.hero.deathBurstParticles; i++) {
+          const angle = Math.random() * Math.PI * 2;
+          const spd = 2 + Math.random() * 4;
+          particles.push({
+            x: hero.x,
+            y: hero.y,
+            vx: Math.cos(angle) * spd,
+            vy: Math.sin(angle) * spd,
+            size: 2 + Math.random() * 3,
+            color: `rgba(224, 200, 120, ${0.6 + Math.random() * 0.3})`,
+            life: 30 + Math.random() * 20,
+            maxLife: 50,
+            gravity: 0,
+            fade: true,
+            alpha: 1.0,
+          });
+        }
+      }
+    }
+
+    // 怪物受伤；返回是否死亡
+    function damageMonster(mon, amount) {
+      mon.hp = Math.max(0, mon.hp - amount);
+      mon.hitFlash = 8;
+      mon.attackWindup = 0; // 受击打断攻击前摇
+
+      if (mon.hp > 0) return false;
+
+      // 死亡：大量元素粒子 + 白色光晕爆发
+      // 守恒：死亡时把前摇中已侵蚀的元素归还到怪物周围（防止总量流失）
+      if (mon.erodedSand + mon.erodedIce > 0.01) {
+        pileElementAround(mon.x, mon.y, mon.erodedSand, mon.erodedIce, CFG.monsterShared.attackPileRadius);
+        mon.erodedSand = 0;
+        mon.erodedIce = 0;
+      }
+      if (mon.type === 'sandworm') {
+        spawnSandDust(mon.x, mon.y, CFG.effects.monsterDeathIntensity);
+      } else {
+        spawnIceShards(mon.x, mon.y, CFG.effects.monsterDeathIntensity);
+      }
+      for (let i = 0; i < CFG.effects.monsterDeathGlow; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const spd = 1.5 + Math.random() * 3;
+        particles.push({
+          x: mon.x,
+          y: mon.y,
+          vx: Math.cos(angle) * spd,
+          vy: Math.sin(angle) * spd,
+          size: 3 + Math.random() * 3,
+          color: 'rgba(255, 255, 255, 0.85)',
+          life: 18 + Math.random() * 12,
+          maxLife: 30,
+          gravity: 0,
+          fade: true,
+          alpha: 1.0,
+        });
+      }
+      monsters = monsters.filter(m => m.id !== mon.id);
+      // 已死亡怪物不再是风箭目标时，场上旧风箭会因找不到目标自然消失
+      return true;
+    }
+
+    // ------------------- 初始化主角 --------------------
+    function initHero() {
+      hero = {
+        x: 10 * TILE_SIZE + TILE_SIZE / 2,  // 像素坐标
+        y: 12 * TILE_SIZE + TILE_SIZE / 2,
+        size: CFG.hero.size,   // 瓦片大小比例
+        speed: CFG.hero.speed, // 每帧移动像素（基础速度）
+        // 生命
+        maxHp: HERO_MAX_HP,
+        hp: HERO_MAX_HP,
+        invincibleFrames: 0, // 受击无敌帧
+        hurtFlash: 0,        // 受击红屏闪烁帧
+        kbVx: 0,             // 受击击退速度
+        kbVy: 0,
+        // 动画
+        walkFrame: 0,
+        facing: 1,   // 1右 -1左
+        // 冲刺加速
+        dashFrames: 0,      // 冲刺剩余帧数
+        dashDuration: CFG.hero.dashDuration, // 冲刺总时长（帧）
+        dashMulMax: CFG.hero.dashMulMax,     // 冲刺最大速度倍率
+        // 残影拖尾
+        afterimages: [],    // 残影列表
+        dashTrailFrame: 0,  // 残影生成计数
+      };
+    }
+
+    // ------------------- 重置整个场景 --------------------
+    function resetScene() {
+      initTiles();
+      initMonsters();
+      initHero();
+      particles = [];
+      windArrows = [];
+      enemyProjectiles = [];
+      iceSpikes = [];
+      gameOver = false;
+      charge.active = false;
+      charge.progress = 0;
+      charge.ready = false;
+      charge.readyBursted = false;
+      charge.readyFrames = 0;
+      updateHeroInfo();
+    }
+
+    // ------------------- 粒子生成 --------------------
+    function spawnSandDust(x, y, intensity = 1) {
+      const count = Math.floor(CFG.effects.sandDustBaseCount * intensity);
+      for (let i = 0; i < count; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const spd = 0.8 + Math.random() * 1.8;
+        const vx = Math.cos(angle) * spd;
+        const vy = Math.sin(angle) * spd - 0.5;
+        particles.push({
+          x: x + (Math.random() - 0.5) * 15,
+          y: y + (Math.random() - 0.5) * 15,
+          vx: vx,
+          vy: vy,
+          size: 1.5 + Math.random() * 3.5,
+          color: `rgba(210, 170, 110, ${0.7 + Math.random() * 0.3})`,
+          life: 40 + Math.random() * 30,
+          maxLife: 70,
+          gravity: 0.01,
+          fade: true,
+          alpha: 1.0,
+        });
+      }
+    }
+
+    function spawnIceShards(x, y, intensity = 1) {
+      const count = Math.floor(CFG.effects.iceShardBaseCount * intensity);
+      for (let i = 0; i < count; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const spd = 0.5 + Math.random() * 1.5;
+        const vx = Math.cos(angle) * spd;
+        const vy = Math.sin(angle) * spd - 0.3;
+        particles.push({
+          x: x + (Math.random() - 0.5) * 15,
+          y: y + (Math.random() - 0.5) * 15,
+          vx: vx,
+          vy: vy,
+          size: 1.2 + Math.random() * 3,
+          color: `rgba(180, 230, 255, ${0.8 + Math.random() * 0.2})`,
+          life: 30 + Math.random() * 30,
+          maxLife: 60,
+          gravity: 0.0,
+          fade: true,
+          alpha: 1.0,
+        });
+      }
+    }
+
+    // 完美蓄力风箭命中时的额外风元素爆发（环形冲击波 + 顺风火花 + 中心光晕）
+    function spawnPerfectHitBurst(x, y, dirX, dirY) {
+      // 1) 环形冲击波：淡青色风粒子向四周高速扩散
+      const ringCount = CFG.perfectHitBurst.ringCount;
+      for (let i = 0; i < ringCount; i++) {
+        const angle = (Math.PI * 2 * i) / ringCount + (Math.random() - 0.5) * 0.25;
+        const spd = 3 + Math.random() * 3;
+        particles.push({
+          x: x + (Math.random() - 0.5) * 10,
+          y: y + (Math.random() - 0.5) * 10,
+          vx: Math.cos(angle) * spd,
+          vy: Math.sin(angle) * spd,
+          size: 2 + Math.random() * 3,
+          color: `rgba(210, 245, 255, ${0.75 + Math.random() * 0.25})`,
+          life: 18 + Math.random() * 16,
+          maxLife: 34,
+          gravity: 0,
+          fade: true,
+          alpha: 1.0,
+        });
+      }
+      // 2) 顺风方向喷射的白色火花（沿风箭冲击方向更密集）
+      const sparkCount = CFG.perfectHitBurst.sparkCount;
+      const baseAngle = Math.atan2(dirY, dirX);
+      for (let i = 0; i < sparkCount; i++) {
+        const angle = baseAngle + (Math.random() - 0.5) * 1.1;
+        const spd = 2.5 + Math.random() * 4;
+        particles.push({
+          x: x + (Math.random() - 0.5) * 8,
+          y: y + (Math.random() - 0.5) * 8,
+          vx: Math.cos(angle) * spd,
+          vy: Math.sin(angle) * spd,
+          size: 1.5 + Math.random() * 2.5,
+          color: `rgba(255, 255, 255, ${0.8 + Math.random() * 0.2})`,
+          life: 14 + Math.random() * 14,
+          maxLife: 28,
+          gravity: 0,
+          fade: true,
+          alpha: 1.0,
+        });
+      }
+      // 3) 中心大光晕粒子（个大、带辉光、快速淡出）
+      for (let i = 0; i < CFG.perfectHitBurst.glowCount; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const spd = 0.5 + Math.random() * 1.2;
+        particles.push({
+          x: x,
+          y: y,
+          vx: Math.cos(angle) * spd,
+          vy: Math.sin(angle) * spd,
+          size: 5 + Math.random() * 4,
+          color: `rgba(190, 235, 255, ${0.5 + Math.random() * 0.2})`,
+          life: 10 + Math.random() * 8,
+          maxLife: 18,
+          gravity: 0,
+          fade: true,
+          alpha: 1.0,
+        });
+      }
+    }
+
+    // ------------------- 风箭技能 --------------------
+    // 朝指定方向发射（不锁敌）。dirX/dirY 为发射方向，缺省时朝主角面向
+    function castWindArrow(perfect = false, dirX = null, dirY = null) {
+      if (!hero || gameOver) return;
+
+      if (dirX === null || dirY === null) {
+        dirX = hero.facing;
+        dirY = 0;
+      }
+      const dirLen = Math.hypot(dirX, dirY) || 1;
+      dirX /= dirLen;
+      dirY /= dirLen;
+
+      const baseSpeed = CFG.windArrow.baseSpeed;
+      const speed = perfect ? baseSpeed * CFG.windArrow.perfectSpeedMul : baseSpeed; // 完美蓄力：速度加成
+      const spreadMul = perfect ? CFG.windArrow.perfectSpreadMul : 1.0; // 完美蓄力：扩散范围加成
+      const knockbackMul = perfect ? CFG.windArrow.perfectKnockbackMul : 1.0; // 完美蓄力：击退加成
+      const damage = perfect ? ARROW_PERFECT_DAMAGE : ARROW_DAMAGE; // 完美蓄力伤害翻倍
+
+      windArrows.push({
+        x: hero.x,
+        y: hero.y,
+        vx: dirX * speed,
+        vy: dirY * speed,
+        life: CFG.windArrow.maxLife, // 最大存活帧
+        hit: false,
+        // 轨迹方向（用于击中后的扩散方向计算）
+        dirX: dirX,
+        dirY: dirY,
+        spreadMul: spreadMul,
+        knockbackMul: knockbackMul,
+        perfect: perfect,
+        damage: damage,
+      });
+
+      // 发射瞬间的风元素粒子爆发（主要朝飞行前方，不在反方向）
+      const burstCount = perfect ? CFG.windArrow.launchBurstPerfect : CFG.windArrow.launchBurstNormal;
+      const spreadAngle = perfect ? 0.45 : 0.55; // 更集中
+      for (let i = 0; i < burstCount; i++) {
+        const angle = Math.atan2(dirY, dirX) + (Math.random() - 0.5) * spreadAngle;
+        const spd = 2 + Math.random() * 3;
+        particles.push({
+          x: hero.x,
+          y: hero.y,
+          vx: Math.cos(angle) * spd,
+          vy: Math.sin(angle) * spd,
+          size: 2 + Math.random() * 2.5,
+          color: perfect
+            ? `rgba(200, 240, 255, ${0.7 + Math.random() * 0.3})`
+            : `rgba(136, 216, 255, ${0.6 + Math.random() * 0.3})`,
+          life: 12 + Math.random() * 12,
+          maxLife: 24,
+          gravity: 0,
+          fade: true,
+          alpha: 1.0,
+        });
+      }
+    }
+
+    // 计算点 (px,py) 处的侵蚀程度（0~1）：与 applyWindArrowDiffusion 的强度场一致
+    // 椭圆内：中心=1，边缘=0.4，线性过渡；椭圆外=0
+    function getErosionDegree(px, py, hitX, hitY, dirX, dirY, spreadMul = 1.0) {
+      const perpX = -dirY;
+      const perpY = dirX;
+      const erodePerp = CFG.erosion.perpRadius * spreadMul;
+      const erodeTrail = CFG.erosion.trailRadius * spreadMul;
+
+      const offX = px - hitX;
+      const offY = py - hitY;
+      const projTrail = (offX * dirX + offY * dirY) / TILE_SIZE;
+      const projPerp = (offX * perpX + offY * perpY) / TILE_SIZE;
+
+      const ellipseT = (projTrail / erodeTrail) ** 2 + (projPerp / erodePerp) ** 2;
+      if (ellipseT > 1.0) return 0;
+      return 1 - Math.sqrt(ellipseT) * 0.6;
+    }
+
+    // 侵蚀区域伤害：击中怪物时，侵蚀场内的怪物按所在位置的侵蚀程度受到额外伤害
+    // 伤害 = 直伤 × 侵蚀程度 × damageFactor，最终不超过直伤
+    function applyErosionDamage(hitX, hitY, dirX, dirY, spreadMul, directDamage) {
+      const factor = CFG.erosion.damageFactor;
+      if (!factor || !directDamage) return;
+
+      // 复制数组：damageMonster 可能从中移除被击败的怪物
+      monsters.slice().forEach(mon => {
+        if (mon.hp <= 0) return; // 已被直伤击败的不再结算
+        const degree = getErosionDegree(mon.x, mon.y, hitX, hitY, dirX, dirY, spreadMul);
+        if (degree <= 0) return;
+        const dmg = Math.min(directDamage, Math.round(directDamage * degree * factor));
+        if (dmg <= 0) return;
+        damageMonster(mon, dmg);
+        // 轻微受击反馈粒子
+        if (mon.type === 'sandworm') {
+          spawnSandDust(mon.x, mon.y, 0.35);
+        } else {
+          spawnIceShards(mon.x, mon.y, 0.35);
+        }
+      });
+    }
+
+    // 瓦片主导元素（沙/冰；边界混合瓦片取厚度较大的一方）
+    function getTileElement(tile) {
+      return tile.sand >= tile.ice ? 'sand' : 'ice';
+    }
+
+    // 地形扩散伤害（独立于侵蚀场风伤、可叠加）：
+    // 本次扩散触及的瓦片上，怪物按所在瓦片被侵蚀/堆积的累计厚度受到额外伤害，
+    // 伤害 = 直伤 × min(上限倍率, 累计厚度变化 / 满值) × 上限倍率；怪物免疫同元素地形伤害
+    function applyTerrainDamage(touchedTiles, directDamage) {
+      const mulMax = CFG.erosion.terrainDamageMulMax;
+      const fullDelta = CFG.erosion.terrainFullDelta;
+      if (!mulMax || !directDamage || !touchedTiles || touchedTiles.size === 0) return;
+
+      // 复制数组：damageMonster 可能从中移除被击败的怪物
+      monsters.slice().forEach(mon => {
+        if (mon.hp <= 0) return;
+        const col = Math.floor(mon.x / TILE_SIZE);
+        const row = Math.floor(mon.y / TILE_SIZE);
+        if (row < 0 || row >= ROWS || col < 0 || col >= COLS) return;
+        if (!touchedTiles.has(row * COLS + col)) return;
+
+        const tile = tiles[row][col];
+        const element = getTileElement(tile);
+        if (mon.element === element) return; // 同元素免疫：沙虫免疫沙、冰晶蝶免疫冰
+
+        // 累计厚度变化 = |当前厚度 - 初始厚度|（侵蚀减少或堆积增加均计入）
+        const delta = Math.abs(tile[element] - BASE_THICKNESS);
+        if (delta <= 0.01) return;
+
+        const mul = mulMax * Math.min(1, delta / fullDelta);
+        const dmg = Math.round(directDamage * mul);
+        if (dmg <= 0) return;
+        damageMonster(mon, dmg);
+        // 地形伤害反馈：喷出对应元素碎屑
+        if (element === 'sand') {
+          spawnSandDust(mon.x, mon.y, 0.5);
+        } else {
+          spawnIceShards(mon.x, mon.y, 0.5);
+        }
+      });
+    }
+
+    // 风箭击中后的扩散效果（厚度变化）
+    function applyWindArrowDiffusion(hitX, hitY, dirX, dirY, spreadMul = 1.0) {
+      // 垂直于轨迹的方向
+      const perpX = -dirY;
+      const perpY = dirX;
+
+      // 侵蚀区：细纺锤形（椭圆），长轴沿垂直方向，短轴沿轨迹方向
+      const erodePerp = CFG.erosion.perpRadius * spreadMul;   // 垂直方向半长轴（格）—— 长轴
+      const erodeTrail = CFG.erosion.trailRadius * spreadMul; // 轨迹方向半短轴（格）—— 短轴（细）
+      const erodeStrength = CFG.erosion.strength; // 侵蚀强度（中心）
+
+      // 堆积区范围：纺锤形外几圈
+      const pileLayers = Math.round(CFG.erosion.pileLayers * spreadMul);  // 堆积层数
+
+      const hitCol = Math.floor(hitX / TILE_SIZE);
+      const hitRow = Math.floor(hitY / TILE_SIZE);
+      // 向上取整：spreadMul 为小数（如未命中边缘扩散 0.7）时 erodePerp 是小数，
+      // 若循环范围也带小数，row/col 会变成分数索引导致 tiles[分数] 越界崩溃（游戏卡死）
+      const searchRange = Math.ceil(erodePerp + pileLayers + 2);
+
+      // 第一步：遍历范围内所有瓦片，分类为侵蚀区和堆积区
+      const erodeTiles = [];
+      const pileTiles = [];
+      const touched = new Set(); // 本次扩散触及的瓦片（行*COLS+列，供地形扩散伤害使用）
+      let totalSandToReduce = 0;
+      let totalIceToReduce = 0;
+
+      for (let dr = -searchRange; dr <= searchRange; dr++) {
+        for (let dc = -searchRange; dc <= searchRange; dc++) {
+          const col = hitCol + dc;
+          const row = hitRow + dr;
+          // 注意：不能用 (row < 0 || row >= ROWS ...) 形式——NaN 比较恒为 false 会穿透防护
+          if (!(row >= 0 && row < ROWS && col >= 0 && col < COLS)) continue;
+
+          // 计算瓦片中心到击中位置的向量
+          const tileCenterX = col * TILE_SIZE + TILE_SIZE / 2 - hitX;
+          const tileCenterY = row * TILE_SIZE + TILE_SIZE / 2 - hitY;
+
+          // 投影到轨迹方向和垂直方向（单位：格）
+          const projTrail = (tileCenterX * dirX + tileCenterY * dirY) / TILE_SIZE;
+          const projPerp = (tileCenterX * perpX + tileCenterY * perpY) / TILE_SIZE;
+
+          const absTrail = Math.abs(projTrail);
+          const absPerp = Math.abs(projPerp);
+
+          // 椭圆方程：(t/a)² + (p/b)² = 1
+          // t <= 1 时在椭圆内（侵蚀区），t > 1 时在外部
+          const ellipseT = (projTrail / erodeTrail) ** 2 + (projPerp / erodePerp) ** 2;
+
+          if (ellipseT <= 1.0) {
+            // 在纺锤形侵蚀区内
+            // 侵蚀强度：中心强，向边缘逐渐减弱（归一化侵蚀程度见 getErosionDegree）
+            const distFromCenter = Math.sqrt(ellipseT); // 0 = 中心, 1 = 边缘
+            const strength = erodeStrength * (1 - distFromCenter * 0.6);
+            const tile = tiles[row][col];
+            const sandReduce = tile.sand * strength;
+            const iceReduce = tile.ice * strength;
+            erodeTiles.push({ tile, col, row, sandReduce, iceReduce });
+            touched.add(row * COLS + col);
+            totalSandToReduce += sandReduce;
+            totalIceToReduce += iceReduce;
+          } else {
+            // 计算到椭圆边缘的近似距离（格）
+            // 用椭圆径向近似：sqrt(ellipseT) 是相对距离，乘以平均半径得到近似绝对距离
+            const avgRadius = (erodeTrail + erodePerp) * 0.5;
+            const distFromEdge = (Math.sqrt(ellipseT) - 1) * avgRadius;
+
+            if (distFromEdge > 0 && distFromEdge <= pileLayers + 0.5) {
+              const tile = tiles[row][col];
+              // 权重：距离越近权重越大
+              const weight = 1 / (distFromEdge + 0.5);
+              pileTiles.push({ tile, col, row, dist: distFromEdge, weight });
+              touched.add(row * COLS + col);
+            }
+          }
+        }
+      }
+
+      // 第二步：从侵蚀区瓦片扣除厚度
+      let actualSandReduced = 0;
+      let actualIceReduced = 0;
+      erodeTiles.forEach(({ tile, sandReduce, iceReduce }) => {
+        const actualSand = Math.min(sandReduce, tile.sand);
+        const actualIce = Math.min(iceReduce, tile.ice);
+        tile.sand -= actualSand;
+        tile.ice -= actualIce;
+        actualSandReduced += actualSand;
+        actualIceReduced += actualIce;
+      });
+
+      // 第三步：按权重分配到堆积区
+      let totalWeight = 0;
+      pileTiles.forEach(t => { totalWeight += t.weight; });
+
+      function distribute(element, totalAmount) {
+        if (totalWeight <= 0 || totalAmount <= 0) return 0;
+        let distributed = 0;
+        pileTiles.forEach(t => {
+          const ratio = t.weight / totalWeight;
+          const gain = totalAmount * ratio;
+          const maxGain = MAX_THICKNESS - t.tile[element];
+          const actualGain = Math.min(gain, maxGain);
+          t.tile[element] += actualGain;
+          distributed += actualGain;
+        });
+        // 处理因上限导致的余量
+        let remaining = totalAmount - distributed;
+        if (remaining > 0.01) {
+          const canReceive = pileTiles.filter(t => t.tile[element] < MAX_THICKNESS);
+          let canWeight = canReceive.reduce((s, t) => s + t.weight, 0);
+          if (canWeight > 0) {
+            canReceive.forEach(t => {
+              const ratio = t.weight / canWeight;
+              const gain = remaining * ratio;
+              const maxGain = MAX_THICKNESS - t.tile[element];
+              const actualGain = Math.min(gain, maxGain);
+              t.tile[element] += actualGain;
+              distributed += actualGain;
+            });
+          }
+        }
+        // 全局兜底：堆积区全部饱和时，余量分配到全图仍有容量的瓦片（保持总量严格守恒）
+        const leftover = totalAmount - distributed;
+        if (leftover > 0.01) {
+          const global = [];
+          for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+            if (tiles[r][c][element] < MAX_THICKNESS - 0.01) global.push(tiles[r][c]);
+          }
+          if (global.length > 0) {
+            const per3 = leftover / global.length;
+            global.forEach(t => {
+              t[element] += Math.min(per3, MAX_THICKNESS - t[element]);
+            });
+          }
+        }
+        return distributed;
+      }
+
+      distribute('sand', actualSandReduced);
+      distribute('ice', actualIceReduced);
+
+      // 第四步：粒子效果
+      // 侵蚀带内的粒子向四周喷出
+      const particleCount = CFG.erosion.burstParticles;
+      for (let i = 0; i < particleCount; i++) {
+        // 从侵蚀带内随机位置出发
+        const randTrail = (Math.random() - 0.5) * 2 * erodeTrail;
+        const randPerp = (Math.random() - 0.5) * 2 * erodePerp;
+        const startX = hitX + dirX * randTrail * TILE_SIZE + perpX * randPerp * TILE_SIZE;
+        const startY = hitY + dirY * randTrail * TILE_SIZE + perpY * randPerp * TILE_SIZE;
+
+        // 向四周随机方向喷出（偏向垂直方向）
+        const angleBias = (Math.random() - 0.5) * 0.6; // 偏向垂直方向
+        const baseAngle = Math.atan2(perpY, perpX) + (Math.random() < 0.5 ? 0 : Math.PI);
+        const angle = baseAngle + angleBias + (Math.random() - 0.5) * 0.8;
+        const spd = 1.5 + Math.random() * 3;
+
+        const col = Math.floor(startX / TILE_SIZE);
+        const row = Math.floor(startY / TILE_SIZE);
+        let color = 'rgba(136, 216, 255, 0.8)';
+        if (row >= 0 && row < ROWS && col >= 0 && col < COLS) {
+          const tile = tiles[row][col];
+          if (tile.sand > tile.ice) {
+            color = `rgba(210, 170, 110, ${0.6 + Math.random() * 0.3})`;
+          } else if (tile.ice > 0) {
+            color = `rgba(180, 230, 255, ${0.7 + Math.random() * 0.3})`;
+          }
+        }
+
+        particles.push({
+          x: startX,
+          y: startY,
+          vx: Math.cos(angle) * spd,
+          vy: Math.sin(angle) * spd,
+          size: 1.5 + Math.random() * 3,
+          color: color,
+          life: 25 + Math.random() * 20,
+          maxLife: 45,
+          gravity: 0,
+          fade: true,
+          alpha: 1.0,
+        });
+      }
+
+      // 中心冲击粒子
+      for (let i = 0; i < CFG.erosion.shockParticles; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const spd = 1 + Math.random() * 3;
+        particles.push({
+          x: hitX + (Math.random() - 0.5) * 12,
+          y: hitY + (Math.random() - 0.5) * 12,
+          vx: Math.cos(angle) * spd,
+          vy: Math.sin(angle) * spd,
+          size: 2 + Math.random() * 4,
+          color: `rgba(136, 216, 255, ${0.6 + Math.random() * 0.4})`,
+          life: 20 + Math.random() * 15,
+          maxLife: 35,
+          gravity: 0,
+          fade: true,
+          alpha: 1.0,
+        });
+      }
+
+      updateTotalInfo();
+      return touched; // 本次扩散触及的瓦片集合（供地形扩散伤害使用）
+    }
+
+    // 更新风箭
+    function updateWindArrows() {
+      for (let i = windArrows.length - 1; i >= 0; i--) {
+        const arrow = windArrows[i];
+        if (arrow.hit) {
+          windArrows.splice(i, 1);
+          continue;
+        }
+
+        arrow.x += arrow.vx;
+        arrow.y += arrow.vy;
+        arrow.life -= 1;
+
+        // 轨迹粒子（完美蓄力时拖尾更长更明显）
+        // 粒子生成位置：只在箭的后方（反方向），不会出现在前方
+        const trailCount = arrow.perfect ? CFG.windArrow.trailCountPerfect : CFG.windArrow.trailCountNormal;
+        const trailWidth = arrow.perfect ? CFG.windArrow.trailWidthPerfect : CFG.windArrow.trailWidthNormal;
+        const trailBackMin = arrow.perfect ? 5 : 3;
+        const trailBackMax = arrow.perfect ? 18 : 10; // 缩短拖尾
+        for (let ti = 0; ti < trailCount; ti++) {
+          // 沿箭飞行反方向的偏移量（后方）
+          const backDist = trailBackMin + Math.random() * (trailBackMax - trailBackMin);
+          const backX = -arrow.dirX * backDist;
+          const backY = -arrow.dirY * backDist;
+          // 垂直于箭方向的随机偏移（宽度）
+          const perpOffset = (Math.random() - 0.5) * trailWidth * 2;
+          const perpX = -arrow.dirY * perpOffset;
+          const perpY = arrow.dirX * perpOffset;
+
+          particles.push({
+            x: arrow.x + backX + perpX,
+            y: arrow.y + backY + perpY,
+            vx: -arrow.vx * (arrow.perfect ? 0.35 : 0.15) + (Math.random() - 0.5) * 0.4,
+            vy: -arrow.vy * (arrow.perfect ? 0.35 : 0.15) + (Math.random() - 0.5) * 0.4,
+            size: (arrow.perfect ? 2.5 : 2) + Math.random() * (arrow.perfect ? 2.5 : 2),
+            color: arrow.perfect
+              ? `rgba(200, 240, 255, ${0.6 + Math.random() * 0.25})`
+              : `rgba(136, 216, 255, ${0.55 + Math.random() * 0.3})`,
+            life: (arrow.perfect ? 22 : 12) + Math.random() * (arrow.perfect ? 12 : 8),
+            maxLife: arrow.perfect ? 34 : 20,
+            gravity: 0,
+            fade: true,
+            alpha: 1.0,
+          });
+        }
+        // 完美蓄力额外外层拖尾（大而淡的光晕，同样只在后方）
+        if (arrow.perfect && Math.random() < 0.3) { // 进一步降低概率
+          const backDist = 6 + Math.random() * 16;
+          const backX = -arrow.dirX * backDist;
+          const backY = -arrow.dirY * backDist;
+          const perpOffset = (Math.random() - 0.5) * 12;
+          const perpX = -arrow.dirY * perpOffset;
+          const perpY = arrow.dirX * perpOffset;
+          particles.push({
+            x: arrow.x + backX + perpX,
+            y: arrow.y + backY + perpY,
+            vx: -arrow.vx * 0.25 + (Math.random() - 0.5) * 0.5,
+            vy: -arrow.vy * 0.25 + (Math.random() - 0.5) * 0.5,
+            size: 3 + Math.random() * 3,
+            color: `rgba(255, 255, 255, ${0.2 + Math.random() * 0.15})`,
+            life: 18 + Math.random() * 10,
+            maxLife: 28,
+            gravity: 0,
+            fade: true,
+            alpha: 1.0,
+          });
+        }
+
+        // 检测是否命中任意怪物（不锁敌，命中距离最近的一个）
+        let target = null;
+        let targetDist = Infinity;
+        monsters.forEach(m => {
+          const d = Math.hypot(m.x - arrow.x, m.y - arrow.y);
+          if (d < TILE_SIZE * CFG.windArrow.hitRadiusMul && d < targetDist) {
+            targetDist = d;
+            target = m;
+          }
+        });
+        if (target) {
+          // 击中！
+          arrow.hit = true;
+          // 造成伤害（完美蓄力伤害更高）
+          damageMonster(target, arrow.damage || ARROW_DAMAGE);
+          // 击退怪物（完美蓄力时击退更强）
+          const baseKbSpeed = CFG.windArrow.knockbackSpeed;
+          const knockbackSpeed = baseKbSpeed * (arrow.knockbackMul || 1);
+          target.vx = arrow.dirX * knockbackSpeed;
+          target.vy = arrow.dirY * knockbackSpeed;
+
+          // 击中特效粒子（根据怪物类型，完美蓄力更强烈）
+          const intensity = arrow.perfect ? CFG.windArrow.perfectHitIntensity : CFG.windArrow.hitIntensity;
+          if (target.type === 'sandworm') {
+            spawnSandDust(target.x, target.y, intensity);
+          } else {
+            spawnIceShards(target.x, target.y, intensity);
+          }
+          // 完美蓄力额外的风元素爆发（更多、更亮的命中粒子）
+          if (arrow.perfect) {
+            spawnPerfectHitBurst(target.x, target.y, arrow.dirX, arrow.dirY);
+          }
+
+          // 触发扩散厚度变化（完美蓄力范围更大），返回本次触及的瓦片集合
+          const touchedTiles = applyWindArrowDiffusion(target.x, target.y, arrow.dirX, arrow.dirY, arrow.spreadMul || 1);
+          // 侵蚀区域伤害：侵蚀场内的怪物（含直击目标）按侵蚀程度受到额外伤害，不超过直伤
+          applyErosionDamage(target.x, target.y, arrow.dirX, arrow.dirY, arrow.spreadMul || 1, arrow.damage || ARROW_DAMAGE);
+          // 地形扩散伤害：被侵蚀/堆积瓦片上的怪物按累计厚度变化受额外伤害（同元素免疫）
+          applyTerrainDamage(touchedTiles, arrow.damage || ARROW_DAMAGE);
+          continue;
+        }
+
+        // 未命中：飞出边界或耗尽时，在飞行终点（钳制回世界内）侵蚀+堆积（弱化扩散，总量守恒）
+        if (arrow.x < 0 || arrow.x > WORLD_W || arrow.y < 0 || arrow.y > WORLD_H || arrow.life <= 0) {
+          const ex = Math.max(0, Math.min(WORLD_W, arrow.x));
+          const ey = Math.max(0, Math.min(WORLD_H, arrow.y));
+          applyWindArrowDiffusion(ex, ey, arrow.dirX, arrow.dirY, CFG.windArrow.missEdgeSpreadMul);
+          windArrows.splice(i, 1);
+        }
+      }
+    }
+
+    // 绘制风箭
+    function drawWindArrows() {
+      windArrows.forEach(arrow => {
+        const angle = Math.atan2(arrow.vy, arrow.vx);
+        const perf = arrow.perfect || false;
+
+        ctx.save();
+        ctx.translate(arrow.x, arrow.y);
+        ctx.rotate(angle);
+
+        // 箭身光晕（完美蓄力更亮更大）
+        ctx.shadowColor = perf ? 'rgba(200, 240, 255, 1)' : 'rgba(136, 216, 255, 0.9)';
+        ctx.shadowBlur = perf ? 22 : 12;
+
+        const scale = perf ? 1.4 : 1.0;
+
+        // 箭身
+        const grad = ctx.createLinearGradient(-18 * scale, 0, 8 * scale, 0);
+        grad.addColorStop(0, perf ? 'rgba(200, 240, 255, 0)' : 'rgba(136, 216, 255, 0)');
+        grad.addColorStop(0.4, perf ? 'rgba(220, 245, 255, 0.9)' : 'rgba(180, 235, 255, 0.8)');
+        grad.addColorStop(1, 'rgba(255, 255, 255, 1)');
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.moveTo(-18 * scale, 0);
+        ctx.lineTo(6 * scale, -3 * scale);
+        ctx.lineTo(10 * scale, 0);
+        ctx.lineTo(6 * scale, 3 * scale);
+        ctx.closePath();
+        ctx.fill();
+
+        // 完美蓄力额外的外层光晕箭身
+        if (perf) {
+          ctx.globalAlpha = 0.5;
+          ctx.shadowBlur = 30;
+          const grad2 = ctx.createLinearGradient(-22 * scale, 0, 10 * scale, 0);
+          grad2.addColorStop(0, 'rgba(180, 230, 255, 0)');
+          grad2.addColorStop(0.5, 'rgba(200, 240, 255, 0.6)');
+          grad2.addColorStop(1, 'rgba(255, 255, 255, 0.8)');
+          ctx.fillStyle = grad2;
+          ctx.beginPath();
+          ctx.moveTo(-22 * scale, 0);
+          ctx.lineTo(8 * scale, -5 * scale);
+          ctx.lineTo(12 * scale, 0);
+          ctx.lineTo(8 * scale, 5 * scale);
+          ctx.closePath();
+          ctx.fill();
+          ctx.globalAlpha = 1.0;
+        }
+
+        // 箭头
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.moveTo(10 * scale, 0);
+        ctx.lineTo(2 * scale, -5 * scale);
+        ctx.lineTo(4 * scale, 0);
+        ctx.lineTo(2 * scale, 5 * scale);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.shadowBlur = 0;
+        ctx.restore();
+      });
+    }
+
+    // ------------------- 蓄力更新 --------------------
+    function updateCharge() {
+      if (!charge.active) return;
+
+      if (!charge.ready) {
+        charge.progress += 1 / charge.duration;
+        if (charge.progress >= 1) {
+          charge.progress = 1;
+          charge.ready = true;
+          charge.readyBursted = false;
+          charge.readyFrames = 0; // 完美蓄力窗口计时
+        }
+      } else {
+        charge.readyFrames++;
+      }
+
+      // 蓄力中吸收风粒子特效（从周围向中心汇聚）
+      if (hero) {
+        // 粒子生成速率随进度增加
+        const rate = CFG.charge.absorbRateBase + charge.progress * CFG.charge.absorbRateGain;
+        if (Math.random() < rate) {
+          const angle = Math.random() * Math.PI * 2;
+          const dist = 25 + Math.random() * 20;
+          const spd = 1.2 + Math.random() * 1.8 + charge.progress * 1.5;
+          particles.push({
+            x: hero.x + Math.cos(angle) * dist,
+            y: hero.y + Math.sin(angle) * dist,
+            vx: -Math.cos(angle) * spd + (Math.random() - 0.5) * 0.6,
+            vy: -Math.sin(angle) * spd + (Math.random() - 0.5) * 0.6,
+            size: 2 + Math.random() * 3,
+            color: `rgba(136, 216, 255, ${0.5 + charge.progress * 0.3})`,
+            life: 12 + Math.random() * 10,
+            maxLife: 22,
+            gravity: 0,
+            fade: true,
+            alpha: 1.0,
+          });
+        }
+      }
+
+      // 蓄力完成瞬间的爆发特效
+      if (charge.ready && !charge.readyBursted && hero) {
+        charge.readyBursted = true;
+        for (let i = 0; i < CFG.charge.readyBurstParticles; i++) {
+          const angle = (i / 25) * Math.PI * 2 + Math.random() * 0.2;
+          const spd = 3 + Math.random() * 3;
+          particles.push({
+            x: hero.x,
+            y: hero.y,
+            vx: Math.cos(angle) * spd,
+            vy: Math.sin(angle) * spd,
+            size: 2.5 + Math.random() * 4,
+            color: `rgba(200, 240, 255, ${0.7 + Math.random() * 0.3})`,
+            life: 25 + Math.random() * 15,
+            maxLife: 40,
+            gravity: 0,
+            fade: true,
+            alpha: 1.0,
+          });
+        }
+        // 额外的冲击波粒子
+        for (let i = 0; i < CFG.charge.readyShockParticles; i++) {
+          const angle = (i / 12) * Math.PI * 2;
+          const spd = 5 + Math.random() * 2;
+          particles.push({
+            x: hero.x,
+            y: hero.y,
+            vx: Math.cos(angle) * spd,
+            vy: Math.sin(angle) * spd,
+            size: 2 + Math.random() * 2,
+            color: `rgba(255, 255, 255, 0.9)`,
+            life: 15 + Math.random() * 8,
+            maxLife: 23,
+            gravity: 0,
+            fade: true,
+            alpha: 1.0,
+          });
+        }
+      }
+    }
+
+    // 判断是否在完美蓄力窗口内（蓄满后0.2s内）
+    function isPerfectCharge() {
+      return charge.ready && charge.readyFrames <= CFG.charge.perfectWindowFrames;
+    }
+
+    // 开始蓄力
+    function startCharge() {
+      if (charge.active || gameOver) return;
+      charge.active = true;
+      charge.progress = 0;
+      charge.ready = false;
+      charge.readyBursted = false;
+      charge.readyFrames = 0;
+    }
+
+    // 松开：蓄满了才朝 dirX/dirY 方向发射，否则取消；完美窗口内发射有加成
+    function releaseCharge(dirX = null, dirY = null) {
+      if (!charge.active) return;
+      if (charge.ready) {
+        const perfect = isPerfectCharge();
+        castWindArrow(perfect, dirX, dirY);
+        // 完美蓄力触发瞬间加速冲刺
+        if (perfect && hero) {
+          hero.dashFrames = hero.dashDuration;
+        }
+      }
+      charge.active = false;
+      charge.progress = 0;
+      charge.ready = false;
+      charge.readyBursted = false;
+    }
+
+    // ------------------- 主角移动 --------------------
+    function updateHero() {
+      if (!hero) return;
+
+      // 受击状态计时
+      if (hero.invincibleFrames > 0) hero.invincibleFrames--;
+      if (hero.hurtFlash > 0) hero.hurtFlash--;
+
+      // 受击击退位移（独立于摇杆移动，快速衰减）
+      if (Math.abs(hero.kbVx) > 0.01 || Math.abs(hero.kbVy) > 0.01) {
+        hero.x += hero.kbVx;
+        hero.y += hero.kbVy;
+        hero.kbVx *= CFG.hero.hurtKnockbackFriction;
+        hero.kbVy *= CFG.hero.hurtKnockbackFriction;
+        if (Math.abs(hero.kbVx) < 0.05) hero.kbVx = 0;
+        if (Math.abs(hero.kbVy) < 0.05) hero.kbVy = 0;
+        const halfKB = TILE_SIZE * hero.size * 0.4;
+        hero.x = Math.max(halfKB, Math.min(COLS * TILE_SIZE - halfKB, hero.x));
+        hero.y = Math.max(halfKB, Math.min(ROWS * TILE_SIZE - halfKB, hero.y));
+      }
+
+      // 计算速度倍率
+      let speedMul = 1.0;
+
+      // 冲刺加速（完美蓄力后的瞬间加速，从2倍逐渐降到1倍）
+      // 冲刺优先级高于蓄力减速：冲刺期间不受蓄力减速影响
+      if (hero.dashFrames > 0) {
+        const progress = 1 - hero.dashFrames / hero.dashDuration; // 0→1
+        // 从2倍线性递减到1倍
+        const dashMul = hero.dashMulMax - (hero.dashMulMax - 1) * progress;
+        speedMul *= dashMul;
+        hero.dashFrames--;
+      } else {
+        // 蓄力减速（仅在没有冲刺时生效）
+        if (charge.active) {
+          speedMul *= CFG.hero.chargeSlowMul;
+        }
+      }
+
+      // 冲刺期间的特效（残影 + 速度线）
+      if (hero.dashFrames > 0) {
+        // 冲刺残影拖尾（每帧生成一个）
+        hero.afterimages.push({
+          x: hero.x,
+          y: hero.y,
+          facing: hero.facing,
+          walkFrame: hero.walkFrame,
+          life: CFG.hero.afterimageLife,   // 残影寿命（帧）
+          maxLife: CFG.hero.afterimageLife,
+        });
+
+        // 冲刺速度线粒子
+        if (Math.random() < CFG.hero.speedLineChance) {
+          const angle = Math.atan2(joystick.dy, joystick.dx) + Math.PI; // 反向
+          if (Math.abs(joystick.dx) > 0.01 || Math.abs(joystick.dy) > 0.01) {
+            for (let i = 0; i < 2; i++) {
+              const spread = (Math.random() - 0.5) * 0.5;
+              const lineAngle = angle + spread;
+              const dist = 15 + Math.random() * 25;
+              particles.push({
+                x: hero.x + Math.cos(lineAngle) * dist,
+                y: hero.y + Math.sin(lineAngle) * dist,
+                vx: Math.cos(lineAngle) * (2 + Math.random() * 2),
+                vy: Math.sin(lineAngle) * (2 + Math.random() * 2),
+                size: 1 + Math.random() * 2,
+                color: `rgba(200, 240, 255, ${0.4 + Math.random() * 0.3})`,
+                life: 6 + Math.random() * 5,
+                maxLife: 11,
+                gravity: 0,
+                fade: true,
+                alpha: 1.0,
+                isSpeedLine: true,
+              });
+            }
+          }
+        }
+      }
+
+      // 更新残影
+      for (let i = hero.afterimages.length - 1; i >= 0; i--) {
+        hero.afterimages[i].life--;
+        if (hero.afterimages[i].life <= 0) {
+          hero.afterimages.splice(i, 1);
+        }
+      }
+
+      const moveX = joystick.dx * hero.speed * speedMul;
+      const moveY = joystick.dy * hero.speed * speedMul;
+
+      if (Math.abs(moveX) > 0.01 || Math.abs(moveY) > 0.01) {
+        hero.x += moveX;
+        hero.y += moveY;
+
+        // 边界限制
+        const halfSize = TILE_SIZE * hero.size * 0.4;
+        hero.x = Math.max(halfSize, Math.min(COLS * TILE_SIZE - halfSize, hero.x));
+        hero.y = Math.max(halfSize, Math.min(ROWS * TILE_SIZE - halfSize, hero.y));
+
+        // 朝向
+        if (moveX > 0.1) hero.facing = 1;
+        else if (moveX < -0.1) hero.facing = -1;
+
+        // 行走动画帧
+        hero.walkFrame += 0.15;
+
+        // 脚步粒子（根据脚下元素）
+        if (Math.random() < CFG.hero.footParticleChance) {
+          const col = Math.floor(hero.x / TILE_SIZE);
+          const row = Math.floor(hero.y / TILE_SIZE);
+          if (row >= 0 && row < ROWS && col >= 0 && col < COLS) {
+            const tile = tiles[row][col];
+            if (tile.sand > 1) {
+              particles.push({
+                x: hero.x + (Math.random() - 0.5) * 8,
+                y: hero.y + TILE_SIZE * 0.3,
+                vx: -moveX * 0.3 + (Math.random() - 0.5) * 1,
+                vy: -Math.abs(moveY) * 0.2 - 0.3,
+                size: 1.5 + Math.random() * 2,
+                color: `rgba(210, 170, 110, 0.6)`,
+                life: 15 + Math.random() * 10,
+                maxLife: 25,
+                gravity: 0.03,
+                fade: true,
+                alpha: 1.0,
+              });
+            }
+            if (tile.ice > 1) {
+              particles.push({
+                x: hero.x + (Math.random() - 0.5) * 8,
+                y: hero.y + TILE_SIZE * 0.3,
+                vx: -moveX * 0.2 + (Math.random() - 0.5) * 0.8,
+                vy: -Math.abs(moveY) * 0.15 - 0.2,
+                size: 1 + Math.random() * 2,
+                color: `rgba(200, 235, 255, 0.7)`,
+                life: 12 + Math.random() * 8,
+                maxLife: 20,
+                gravity: 0.01,
+                fade: true,
+                alpha: 1.0,
+              });
+            }
+          }
+        }
+
+        updateHeroInfo();
+      }
+    }
+
+    // ------------------- 粒子更新 --------------------
+    function updateParticles() {
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vy += p.gravity || 0;
+        p.vx *= 0.99;
+        p.vy *= 0.99;
+        p.life -= 1;
+        if (p.fade) {
+          p.alpha = Math.max(0, p.life / p.maxLife);
+        }
+        if (p.life <= 0) {
+          particles.splice(i, 1);
+        }
+      }
+    }
+
+    // ------------------- HSL 颜色混合 --------------------
+    function mixColors(h1, s1, l1, h2, s2, l2, ratio) {
+      let hDiff = h2 - h1;
+      if (hDiff > 180) hDiff -= 360;
+      if (hDiff < -180) hDiff += 360;
+      const h = h1 + hDiff * ratio;
+      const s = s1 + (s2 - s1) * ratio;
+      const l = l1 + (l2 - l1) * ratio;
+      return { h, s, l };
+    }
+
+    // ------------------- 绘制场景 --------------------
+    function draw() {
+      // 重置变换清空整个缓冲区，再按渲染分辨率缩放到逻辑坐标
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.setTransform(renderScale, 0, 0, renderScale, 0, 0);
+
+      const SAND_H = CFG.terrainRender.sandH;
+      const SAND_S = CFG.terrainRender.sandS;
+      const SAND_L = CFG.terrainRender.sandL;
+      const ICE_H = CFG.terrainRender.iceH;
+      const ICE_S = CFG.terrainRender.iceS;
+      const ICE_L = CFG.terrainRender.iceL;
+      const REF_THICKNESS = BASE_THICKNESS;
+      // 亮度范围：厚度0时最亮(maxLightFactor)，厚度5时基准，厚度上限时最暗(minLightFactor)
+      const MAX_LIGHT_FACTOR = CFG.terrainRender.maxLightFactor;
+      const MIN_LIGHT_FACTOR = CFG.terrainRender.minLightFactor;
+
+      // 1. 绘制地形瓦片
+      for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+          const tile = tiles[r][c];
+          const x = c * TILE_SIZE;
+          const y = r * TILE_SIZE;
+
+          const sand = tile.sand;
+          const ice = tile.ice;
+          const total = sand + ice;
+
+          const iceRatio = total > 0 ? ice / total : 0;
+          const mixed = mixColors(SAND_H, SAND_S, SAND_L, ICE_H, ICE_S, ICE_L, iceRatio);
+
+          // 亮度映射：厚度 0 → MAX_LIGHT_FACTOR，厚度 REF → 1.0，厚度 MAX → MIN_LIGHT_FACTOR
+          // 使用分段线性：0~REF 段从 MAX 降到 1.0，REF~MAX 段从 1.0 降到 MIN
+          let lightFactor;
+          if (total <= REF_THICKNESS) {
+            const t = total / REF_THICKNESS; // 0~1
+            lightFactor = MAX_LIGHT_FACTOR + (1.0 - MAX_LIGHT_FACTOR) * t;
+          } else {
+            const t = (total - REF_THICKNESS) / (MAX_THICKNESS - REF_THICKNESS); // 0~1
+            lightFactor = 1.0 + (MIN_LIGHT_FACTOR - 1.0) * t;
+          }
+          const lightness = mixed.l * lightFactor;
+
+          // 饱和度也随厚度略微变化（薄时饱和度稍低，厚时稍高）
+          const satFactor = 0.8 + 0.4 * Math.min(1, total / MAX_THICKNESS);
+          const saturation = mixed.s * satFactor;
+
+          ctx.fillStyle = `hsl(${mixed.h}, ${saturation}%, ${lightness}%)`;
+          ctx.fillRect(x, y, TILE_SIZE, TILE_SIZE);
+
+          // 纹理
+          const seed = tile.seed;
+          if (sand > 0.5) {
+            const sandAlpha = Math.min(0.12, sand / REF_THICKNESS * 0.1);
+            ctx.fillStyle = `rgba(80, 50, 20, ${sandAlpha})`;
+            const sx1 = (seed * 1.7) % (TILE_SIZE - 6);
+            const sy1 = (seed * 2.3) % (TILE_SIZE - 4);
+            ctx.fillRect(x + sx1, y + sy1, 4, 2);
+            const sx2 = (seed * 3.1 + 10) % (TILE_SIZE - 8);
+            const sy2 = (seed * 1.9 + 8) % (TILE_SIZE - 4);
+            ctx.fillRect(x + sx2, y + sy2, 5, 2);
+          }
+          if (ice > 0.5) {
+            const iceAlpha = Math.min(0.2, ice / REF_THICKNESS * 0.15);
+            ctx.fillStyle = `rgba(255, 255, 255, ${iceAlpha})`;
+            const ix1 = (seed * 2.1 + 3) % (TILE_SIZE - 10);
+            const iy1 = (seed * 1.5 + 2) % (TILE_SIZE - 4);
+            ctx.fillRect(x + ix1, y + iy1, 8, 2);
+            const ix2 = (seed * 2.7 + 12) % (TILE_SIZE - 8);
+            const iy2 = (seed * 3.3 + 10) % (TILE_SIZE - 3);
+            ctx.fillRect(x + ix2, y + iy2, 5, 2);
+          }
+
+          // 网格线
+          ctx.strokeStyle = `rgba(0, 0, 0, 0.08)`;
+          ctx.lineWidth = 1;
+          ctx.strokeRect(x + 0.5, y + 0.5, TILE_SIZE - 1, TILE_SIZE - 1);
+        }
+      }
+
+      // 2. 绘制怪物
+      monsters.forEach(mon => {
+        const x = mon.x;
+        const y = mon.y;
+        const size = TILE_SIZE * mon.size;
+
+        if (mon.type === 'sandworm') {
+          // 前摇时形变：突进=下压变扁，新星=鼓胀脉冲；突进中沿运动方向拉长
+          ctx.save();
+          if (mon.attackWindup > 0 && mon.attackKind === 'nova') {
+            const pulse = 1 + Math.sin(performance.now() * 0.025) * 0.08;
+            ctx.translate(x, y);
+            ctx.scale(pulse, pulse);
+            ctx.translate(-x, -y);
+          } else if (mon.attackWindup > 0) {
+            const t = 1 - mon.attackWindup / (mon.windupTotal || mon.attackWindupMax || 1); // 0→1
+            ctx.translate(x, y + size * 0.05 * t);
+            ctx.scale(1 + 0.12 * t, 1 - 0.16 * t);
+            ctx.translate(-x, -y);
+          } else if (mon.lungeFrames > 0) {
+            const la = Math.atan2(mon.lungeVy, mon.lungeVx);
+            ctx.translate(x, y);
+            ctx.rotate(la);
+            ctx.scale(1.25, 0.78);
+            ctx.rotate(-la);
+            ctx.translate(-x, -y);
+          }
+          ctx.shadowColor = 'rgba(0,0,0,0.5)';
+          ctx.shadowBlur = 12;
+          ctx.fillStyle = '#4a3723';
+          ctx.beginPath();
+          ctx.roundRect(x - size/2, y - size/2, size, size, 6);
+          ctx.fill();
+          ctx.shadowBlur = 0;
+          ctx.fillStyle = '#6b4f30';
+          ctx.beginPath();
+          ctx.roundRect(x - size/2 + 3, y - size/2 + 4, size - 6, 4, 3);
+          ctx.fill();
+          ctx.fillStyle = '#8f6b3e';
+          ctx.beginPath();
+          ctx.roundRect(x - size/2 + 5, y + 2, size - 10, 4, 3);
+          ctx.fill();
+          ctx.fillStyle = '#d9b382';
+          ctx.beginPath();
+          ctx.arc(x - 4, y - 5, 2.5, 0, Math.PI * 2);
+          ctx.arc(x + 4, y - 5, 2.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = '#000';
+          ctx.beginPath();
+          ctx.arc(x - 4.5, y - 6, 1, 0, Math.PI * 2);
+          ctx.arc(x + 3.5, y - 6, 1, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        } else if (mon.type === 'icefly') {
+          // 冰晶蝶
+          const floatY = Math.sin(mon.floatPhase + performance.now() * 0.002) * 3;
+          const wingFlap = Math.sin(performance.now() * 0.01) * 0.3 + 0.7;
+
+          ctx.shadowColor = 'rgba(160, 220, 255, 0.8)';
+          ctx.shadowBlur = 16;
+
+          // 翅膀（左）
+          ctx.fillStyle = 'rgba(180, 230, 255, 0.7)';
+          ctx.beginPath();
+          ctx.ellipse(x - size*0.35, y + floatY - size*0.1, size*0.4 * wingFlap, size*0.35, -0.4, 0, Math.PI * 2);
+          ctx.fill();
+
+          // 翅膀（右）
+          ctx.beginPath();
+          ctx.ellipse(x + size*0.35, y + floatY - size*0.1, size*0.4 * wingFlap, size*0.35, 0.4, 0, Math.PI * 2);
+          ctx.fill();
+
+          // 身体
+          ctx.shadowBlur = 0;
+          ctx.fillStyle = '#a8dcf0';
+          ctx.beginPath();
+          ctx.roundRect(x - size*0.15, y + floatY - size*0.3, size*0.3, size*0.6, 6);
+          ctx.fill();
+
+          // 冰晶棱角（头顶）
+          ctx.fillStyle = '#d4f0ff';
+          ctx.beginPath();
+          ctx.moveTo(x - size*0.1, y + floatY - size*0.25);
+          ctx.lineTo(x, y + floatY - size*0.45);
+          ctx.lineTo(x + size*0.1, y + floatY - size*0.25);
+          ctx.fill();
+
+          // 眼睛
+          ctx.fillStyle = '#1a3b4b';
+          ctx.beginPath();
+          ctx.arc(x - size*0.06, y + floatY - size*0.05, size*0.06, 0, Math.PI * 2);
+          ctx.arc(x + size*0.06, y + floatY - size*0.05, size*0.06, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = '#fff';
+          ctx.beginPath();
+          ctx.arc(x - size*0.05, y + floatY - size*0.08, size*0.025, 0, Math.PI * 2);
+          ctx.arc(x + size*0.07, y + floatY - size*0.08, size*0.025, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.shadowBlur = 0;
+        ctx.shadowColor = 'transparent';
+
+        // 受击闪白
+        if (mon.hitFlash > 0) {
+          ctx.globalAlpha = (mon.hitFlash / 8) * 0.65;
+          ctx.fillStyle = '#ffffff';
+          if (mon.type === 'sandworm') {
+            ctx.beginPath();
+            ctx.roundRect(x - size / 2, y - size / 2, size, size, 6);
+            ctx.fill();
+          } else {
+            ctx.beginPath();
+            ctx.arc(x, y, size * 0.42, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          ctx.globalAlpha = 1.0;
+        }
+
+        // 攻击前摇预警（红色脉冲光环 + 感叹号；新星用更大范围提示）
+        if (mon.attackWindup > 0) {
+          const windupMax = mon.windupTotal || mon.attackWindupMax || 1;
+          const t = 1 - mon.attackWindup / windupMax; // 0→1
+          const isNova = mon.attackKind === 'nova';
+          const ringR = isNova
+            ? CFG.sandworm.novaRadius * (0.5 + t * 0.5) // 新星：提示实际判定半径
+            : size * (0.55 + t * 0.25);
+          const pulse = 1 + Math.sin(performance.now() * 0.03) * 0.08;
+          ctx.strokeStyle = `rgba(255, 70, 70, ${0.5 + t * 0.4})`;
+          ctx.lineWidth = isNova ? 3 : 2.5;
+          ctx.beginPath();
+          ctx.arc(x, y, ringR * pulse, 0, Math.PI * 2);
+          ctx.stroke();
+          // 头顶感叹号
+          ctx.fillStyle = `rgba(255, 80, 80, ${0.75 + t * 0.25})`;
+          ctx.font = 'bold 16px system-ui, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText('!', x, y - size / 2 - 14);
+        }
+
+        // 头顶血条
+        drawMonsterHpBar(mon);
+      });
+
+      // 3. 绘制主角残影（在主角之前绘制，在身后）
+      if (hero && hero.afterimages.length > 0) {
+        hero.afterimages.forEach(img => {
+          drawHeroAfterimage(img);
+        });
+      }
+
+      // 4. 绘制主角（受击无敌期间快速闪烁）
+      if (hero) {
+        const blink = hero.invincibleFrames > 0 && Math.floor(hero.invincibleFrames / 4) % 2 === 0;
+        if (!blink) drawHero();
+      }
+
+      // 5. 绘制粒子
+      particles.forEach(p => {
+        ctx.globalAlpha = p.alpha;
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size * 0.5, 0, Math.PI * 2);
+        ctx.fill();
+        if (p.size > 2.5) {
+          ctx.shadowBlur = 10;
+          ctx.shadowColor = p.color;
+          ctx.fill();
+          ctx.shadowBlur = 0;
+        }
+      });
+      ctx.globalAlpha = 1.0;
+
+      // 5. 绘制风箭
+      drawWindArrows();
+
+      // 5.5 绘制敌方冰刺弹道
+      drawEnemyProjectiles();
+
+      // 5.6 绘制天降冰锥（警示圈 + 下落冰锥）
+      drawIceSpikes();
+
+      // 6. 战斗 HUD（主角血条 + 受击红屏）
+      drawCombatHud();
+
+      // 6.5 蓄力瞄准指示
+      drawAimIndicator();
+
+      // 7. 游戏结束遮罩
+      if (gameOver) drawGameOverOverlay();
+
+      // 8. 绘制虚拟摇杆
+      drawJoystick();
+    }
+
+    // 怪物头顶血条
+    function drawMonsterHpBar(mon) {
+      const barW = Math.max(CFG.hud.monsterBarMinWidth, TILE_SIZE * mon.size * CFG.hud.monsterBarWidthFactor);
+      const barH = CFG.hud.monsterBarHeight;
+      const bx = mon.x - barW / 2;
+      const by = mon.y - TILE_SIZE * mon.size / 2 - 9;
+      const ratio = Math.max(0, mon.hp / mon.maxHp);
+
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+      ctx.beginPath();
+      ctx.roundRect(bx - 1, by - 1, barW + 2, barH + 2, 3);
+      ctx.fill();
+
+      // 血量：高→绿，中→黄，低→红
+      let fillColor = '#5fd068';
+      if (ratio < CFG.hud.lowHpThreshold) fillColor = '#e0524d';
+      else if (ratio < CFG.hud.midHpThreshold) fillColor = '#e0b34d';
+      ctx.fillStyle = fillColor;
+      if (ratio > 0) {
+        ctx.beginPath();
+        ctx.roundRect(bx, by, barW * ratio, barH, 2);
+        ctx.fill();
+      }
+    }
+
+    // 绘制敌方冰刺弹道（旋转菱形冰晶）
+    function drawEnemyProjectiles() {
+      enemyProjectiles.forEach(p => {
+        const angle = Math.atan2(p.vy, p.vx);
+        ctx.save();
+        ctx.translate(p.x, p.y);
+        ctx.rotate(angle);
+        ctx.shadowColor = 'rgba(160, 220, 255, 0.9)';
+        ctx.shadowBlur = 10;
+        ctx.fillStyle = '#d4f0ff';
+        ctx.beginPath();
+        ctx.moveTo(8, 0);
+        ctx.lineTo(0, -4);
+        ctx.lineTo(-5, 0);
+        ctx.lineTo(0, 4);
+        ctx.closePath();
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = 'rgba(255,255,255,0.9)';
+        ctx.beginPath();
+        ctx.moveTo(8, 0);
+        ctx.lineTo(1, -2);
+        ctx.lineTo(1, 2);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      });
+    }
+
+    // 战斗 HUD：主角生命条 + 受击红屏闪烁
+    function drawCombatHud() {
+      if (!hero) return;
+
+      // 受击红屏（随 hurtFlash 衰减）
+      if (hero.hurtFlash > 0) {
+        const a = (hero.hurtFlash / 20) * 0.28;
+        ctx.fillStyle = `rgba(220, 40, 40, ${a})`;
+        ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+      }
+
+      // 主角血条（左上角）
+      const barW = CFG.hud.heroBarWidth, barH = CFG.hud.heroBarHeight;
+      const bx = CFG.hud.heroBarX, by = CFG.hud.heroBarY;
+      const ratio = Math.max(0, hero.hp / hero.maxHp);
+
+      ctx.fillStyle = 'rgba(10, 14, 20, 0.7)';
+      ctx.beginPath();
+      ctx.roundRect(bx - 4, by - 4, barW + 8, barH + 22, 8);
+      ctx.fill();
+
+      ctx.fillStyle = '#a4b3cc';
+      ctx.font = 'bold 12px system-ui, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('生命', bx + 2, by + barH + 8);
+
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+      ctx.beginPath();
+      ctx.roundRect(bx, by, barW, barH, 5);
+      ctx.fill();
+
+      if (ratio > 0) {
+        let hpColor = '#5fd068';
+        if (ratio < CFG.hud.lowHpThreshold) hpColor = '#e0524d';
+        else if (ratio < CFG.hud.midHpThreshold) hpColor = '#e0b34d';
+        ctx.fillStyle = hpColor;
+        ctx.beginPath();
+        ctx.roundRect(bx + 2, by + 2, (barW - 4) * ratio, barH - 4, 4);
+        ctx.fill();
+      }
+
+      // 数值
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 11px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(`${Math.ceil(hero.hp)} / ${hero.maxHp}`, bx + barW / 2, by + barH / 2 + 1);
+    }
+
+    // 游戏结束遮罩
+    function drawGameOverOverlay() {
+      ctx.fillStyle = 'rgba(8, 10, 16, 0.65)';
+      ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+
+      ctx.fillStyle = '#ff8a8a';
+      ctx.font = 'bold 44px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('你被击败了', WORLD_W / 2, WORLD_H / 2 - 24);
+
+      ctx.fillStyle = '#d7e0f0';
+      ctx.font = '18px system-ui, sans-serif';
+      ctx.fillText('点击「重置场景」重新开始', WORLD_W / 2, WORLD_H / 2 + 24);
+    }
+
+    // 蓄力瞄准指示：拖动轨迹 + 发射方向预览（长按终点 → 长按起点方向）
+    function drawAimIndicator() {
+      if (!charge.active || !aim.active || !hero) return;
+
+      const dx = aim.startX - aim.curX;
+      const dy = aim.startY - aim.curY;
+      const len = Math.hypot(dx, dy);
+
+      ctx.save();
+
+      // 拖动轨迹（起点 → 当前点，虚线）
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 5]);
+      ctx.beginPath();
+      ctx.moveTo(aim.startX, aim.startY);
+      ctx.lineTo(aim.curX, aim.curY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // 起点 / 当前点标记
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+      ctx.beginPath();
+      ctx.arc(aim.startX, aim.startY, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(aim.curX, aim.curY, 3, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 发射方向预览（从主角出发，蓄满后变亮青色）
+      if (len >= CFG.charge.minDragDistance) {
+        const ux = dx / len, uy = dy / len;
+        const color = charge.ready ? 'rgba(140, 235, 255, 0.95)' : 'rgba(255, 255, 255, 0.65)';
+        const L = CFG.charge.aimPreviewLength;
+        const ex = hero.x + ux * L, ey = hero.y + uy * L;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = charge.ready ? 3 : 2;
+        ctx.beginPath();
+        ctx.moveTo(hero.x + ux * 14, hero.y + uy * 14);
+        ctx.lineTo(ex, ey);
+        ctx.stroke();
+        // 箭头
+        const ang = Math.atan2(uy, ux);
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.moveTo(ex + Math.cos(ang) * 9, ey + Math.sin(ang) * 9);
+        ctx.lineTo(ex + Math.cos(ang + 2.5) * 8, ey + Math.sin(ang + 2.5) * 8);
+        ctx.lineTo(ex + Math.cos(ang - 2.5) * 8, ey + Math.sin(ang - 2.5) * 8);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      ctx.restore();
+    }
+
+    // 绘制冲刺残影（半透明蓝白色调，淡出+缩小）
+    function drawHeroAfterimage(img) {
+      const x = img.x;
+      const y = img.y;
+      const alphaRatio = img.life / img.maxLife; // 1→0
+      const scale = 0.7 + 0.1 * alphaRatio; // 从0.8缩小到0.7（更小）
+      const alpha = alphaRatio * 0.4; // 最大不透明度0.4（更淡）
+
+      const size = TILE_SIZE * hero.size * scale;
+      const bobOffset = Math.sin(img.walkFrame) * 1;
+
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.translate(x, y + bobOffset);
+      ctx.scale(img.facing, 1);
+
+      // 残影发光
+      ctx.shadowColor = 'rgba(136, 216, 255, 0.7)';
+      ctx.shadowBlur = 8 * alphaRatio;
+
+      // 身体（统一青蓝色调）
+      const bodyGrad = ctx.createLinearGradient(0, -size * 0.3, 0, size * 0.2);
+      bodyGrad.addColorStop(0, 'rgba(180, 235, 255, 0.8)');
+      bodyGrad.addColorStop(1, 'rgba(100, 180, 230, 0.75)');
+      ctx.fillStyle = bodyGrad;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, size * 0.2, size * 0.26, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 头（亮白蓝色）
+      ctx.fillStyle = 'rgba(220, 245, 255, 0.9)';
+      ctx.beginPath();
+      ctx.arc(0, -size * 0.3, size * 0.14, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 风元素宝石（发光）
+      ctx.shadowBlur = 5 * alphaRatio;
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+      ctx.beginPath();
+      ctx.arc(0, -size * 0.05, size * 0.04, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    function drawHero() {
+      const x = hero.x;
+      const y = hero.y;
+      const size = TILE_SIZE * hero.size;
+      const bob = Math.sin(hero.walkFrame) * 1.5; // 行走上下浮动
+
+      ctx.save();
+      ctx.translate(x, y + bob);
+      if (hero.facing < 0) ctx.scale(-1, 1);
+
+      // 影子
+      ctx.shadowColor = 'rgba(0,0,0,0.4)';
+      ctx.shadowBlur = 8;
+      ctx.shadowOffsetY = 3;
+
+      // 身体（金色披风战士风格）
+      // 身体主体
+      ctx.fillStyle = '#5a4a7a';  // 深紫色外衣
+      ctx.beginPath();
+      ctx.roundRect(-size*0.35, -size*0.15, size*0.7, size*0.55, 5);
+      ctx.fill();
+
+      ctx.shadowBlur = 0;
+      ctx.shadowOffsetY = 0;
+
+      // 腰带
+      ctx.fillStyle = '#e0c878';
+      ctx.fillRect(-size*0.35, size*0.18, size*0.7, size*0.08);
+
+      // 头部
+      ctx.fillStyle = '#f0d8b0';  // 肤色
+      ctx.beginPath();
+      ctx.roundRect(-size*0.28, -size*0.45, size*0.56, size*0.38, 6);
+      ctx.fill();
+
+      // 头发（金色）
+      ctx.fillStyle = '#e0c878';
+      ctx.beginPath();
+      ctx.roundRect(-size*0.32, -size*0.5, size*0.64, size*0.18, 5);
+      ctx.fill();
+      // 刘海
+      ctx.fillStyle = '#d4b860';
+      ctx.beginPath();
+      ctx.moveTo(-size*0.28, -size*0.38);
+      ctx.lineTo(-size*0.1, -size*0.3);
+      ctx.lineTo(size*0.05, -size*0.35);
+      ctx.lineTo(size*0.2, -size*0.28);
+      ctx.lineTo(size*0.24, -size*0.4);
+      ctx.lineTo(-size*0.28, -size*0.45);
+      ctx.fill();
+
+      // 眼睛
+      ctx.fillStyle = '#2a2040';
+      ctx.beginPath();
+      ctx.arc(-size*0.1, -size*0.25, 1.8, 0, Math.PI * 2);
+      ctx.arc(size*0.1, -size*0.25, 1.8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(-size*0.08, -size*0.27, 0.7, 0, Math.PI * 2);
+      ctx.arc(size*0.12, -size*0.27, 0.7, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 披风（飘动）
+      const capeSway = Math.sin(hero.walkFrame * 0.7) * 3;
+      ctx.fillStyle = '#7a5a9a';
+      ctx.beginPath();
+      ctx.moveTo(-size*0.35, -size*0.15);
+      ctx.lineTo(-size*0.5 - capeSway*0.5, size*0.35);
+      ctx.lineTo(-size*0.2, size*0.4);
+      ctx.lineTo(-size*0.2, -size*0.1);
+      ctx.closePath();
+      ctx.fill();
+
+      // 胸口宝石（风元素标志）
+      ctx.fillStyle = '#88d8ff';
+      ctx.shadowColor = 'rgba(136, 216, 255, 0.8)';
+      ctx.shadowBlur = 6;
+      ctx.beginPath();
+      ctx.moveTo(0, -size*0.05);
+      ctx.lineTo(size*0.08, size*0.05);
+      ctx.lineTo(0, size*0.15);
+      ctx.lineTo(-size*0.08, size*0.05);
+      ctx.closePath();
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      ctx.restore();
+    }
+
+    function drawJoystick() {
+      // 底座
+      ctx.save();
+      ctx.globalAlpha = 0.5;
+      ctx.fillStyle = 'rgba(255,255,255,0.1)';
+      ctx.beginPath();
+      ctx.arc(joystick.baseX, joystick.baseY, joystick.baseRadius, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      // 方向指示线
+      ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(joystick.baseX - joystick.baseRadius * 0.6, joystick.baseY);
+      ctx.lineTo(joystick.baseX + joystick.baseRadius * 0.6, joystick.baseY);
+      ctx.moveTo(joystick.baseX, joystick.baseY - joystick.baseRadius * 0.6);
+      ctx.lineTo(joystick.baseX, joystick.baseY + joystick.baseRadius * 0.6);
+      ctx.stroke();
+
+      // 摇杆头
+      ctx.globalAlpha = joystick.active ? 0.9 : 0.7;
+      const grad = ctx.createRadialGradient(
+        joystick.knobX - 5, joystick.knobY - 5, 2,
+        joystick.knobX, joystick.knobY, joystick.knobRadius
+      );
+      grad.addColorStop(0, 'rgba(224, 200, 120, 0.9)');
+      grad.addColorStop(1, 'rgba(150, 120, 60, 0.9)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(joystick.knobX, joystick.knobY, joystick.knobRadius, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
+    // ------------------- 虚拟摇杆事件 --------------------
+    function getTouchFromEvent(e) {
+      // 优先用 changedTouches（触发当前事件的手指），支持多点触控
+      if (e.changedTouches && e.changedTouches.length > 0) {
+        return e.changedTouches[0];
+      }
+      if (e.touches && e.touches.length > 0) {
+        return e.touches[0];
+      }
+      return e; // 鼠标/指针事件
+    }
+
+    function getCanvasPos(e) {
+      const rect = canvas.getBoundingClientRect();
+      // 映射到世界逻辑坐标（与显示缩放、渲染分辨率无关）
+      const scaleX = WORLD_W / rect.width;
+      const scaleY = WORLD_H / rect.height;
+      const touch = getTouchFromEvent(e);
+      const clientX = touch.clientX;
+      const clientY = touch.clientY;
+      return {
+        x: (clientX - rect.left) * scaleX,
+        y: (clientY - rect.top) * scaleY,
+      };
+    }
+
+    function getPointerId(e) {
+      const touch = getTouchFromEvent(e);
+      return touch.identifier !== undefined ? touch.identifier : (e.pointerId ?? 0);
+    }
+
+    function handleJoystickStart(e) {
+      const pos = getCanvasPos(e);
+      const dist = Math.hypot(pos.x - joystick.baseX, pos.y - joystick.baseY);
+      if (dist < joystick.baseRadius * 1.5) {
+        joystick.active = true;
+        joystick.pointerId = getPointerId(e);
+        handleJoystickMove(e);
+        e.preventDefault();
+        return;
+      }
+      // 摇杆区域之外：长按场景开始蓄力瞄准
+      handleAimStart(e, pos);
+    }
+
+    // 长按场景：开始蓄力瞄准
+    function handleAimStart(e, pos) {
+      if (gameOver || charge.active || aim.active) return;
+      aim.active = true;
+      aim.pointerId = getPointerId(e);
+      aim.startX = aim.curX = pos.x;
+      aim.startY = aim.curY = pos.y;
+      startCharge();
+    }
+
+    function handleAimMove(e) {
+      if (!aim.active) return;
+      if (getPointerId(e) !== aim.pointerId) return;
+      const pos = getCanvasPos(e);
+      aim.curX = pos.x;
+      aim.curY = pos.y;
+      if (e.cancelable) e.preventDefault();
+    }
+
+    // 松开：蓄满则朝「长按终点 → 长按起点」方向发射，未蓄满取消
+    function handleAimEnd(e) {
+      if (!aim.active) return;
+      if (getPointerId(e) !== aim.pointerId) return;
+      const dx = aim.startX - aim.curX;
+      const dy = aim.startY - aim.curY;
+      const len = Math.hypot(dx, dy);
+      let dirX = 1, dirY = 0;
+      if (len >= CFG.charge.minDragDistance) {
+        dirX = dx / len;
+        dirY = dy / len;
+      } else if (hero) {
+        dirX = hero.facing; // 几乎未拖动时朝主角面向发射
+        dirY = 0;
+      }
+      aim.active = false;
+      aim.pointerId = null;
+      releaseCharge(dirX, dirY);
+    }
+
+    function handleJoystickMove(e) {
+      handleAimMove(e); // 同步更新蓄力瞄准
+      if (!joystick.active) return;
+      // 多点触控时，只处理属于摇杆的那根手指
+      const pid = getPointerId(e);
+      if (pid !== joystick.pointerId) return;
+      const pos = getCanvasPos(e);
+      let dx = pos.x - joystick.baseX;
+      let dy = pos.y - joystick.baseY;
+      const dist = Math.hypot(dx, dy);
+      const maxDist = joystick.baseRadius - joystick.knobRadius * 0.3;
+
+      if (dist > maxDist) {
+        dx = (dx / dist) * maxDist;
+        dy = (dy / dist) * maxDist;
+      }
+
+      joystick.knobX = joystick.baseX + dx;
+      joystick.knobY = joystick.baseY + dy;
+      joystick.dx = dx / maxDist;
+      joystick.dy = dy / maxDist;
+      e.preventDefault();
+    }
+
+    function handleJoystickEnd(e) {
+      handleAimEnd(e); // 松开时结算蓄力发射
+      if (!joystick.active) return;
+      // 多点触控时，只有摇杆对应的手指抬起才结束
+      const pid = getPointerId(e);
+      if (pid !== joystick.pointerId) return;
+      joystick.active = false;
+      joystick.pointerId = null;
+      joystick.knobX = joystick.baseX;
+      joystick.knobY = joystick.baseY;
+      joystick.dx = 0;
+      joystick.dy = 0;
+    }
+
+    // 工具: Canvas roundRect
+    CanvasRenderingContext2D.prototype.roundRect = function(x, y, w, h, r) {
+      if (w < 2 * r) r = w / 2;
+      if (h < 2 * r) r = h / 2;
+      this.moveTo(x + r, y);
+      this.lineTo(x + w - r, y);
+      this.quadraticCurveTo(x + w, y, x + w, y + r);
+      this.lineTo(x + w, y + h - r);
+      this.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+      this.lineTo(x + r, y + h);
+      this.quadraticCurveTo(x, y + h, x, y + h - r);
+      this.lineTo(x, y + r);
+      this.quadraticCurveTo(x, y, x + r, y);
+      return this;
+    };
+
+    // ------------------- 动画循环（固定逻辑步长，锁定 60fps 逻辑速度） -------------------
+    let __frameCount = 0;
+    // 高刷屏（120/144Hz，微信内置浏览器常见）下 rAF 每秒触发 120/144 次，
+    // 若每帧直接更新，按帧推进的移动/前摇/粒子会成倍加速。
+    // 做法：按 rAF 时间戳累积真实流逝时间，每 1000/60ms 跑一步逻辑；渲染仍每帧一次。
+    const FRAME_MS = 1000 / CFG.frame.fps;
+    let __lastFrameTime = 0;
+    let __frameAccumulator = 0;
+    function stepUpdate() {
+      updateKeyboardInput();
+      if (!gameOver) {
+        updateCharge();
+        updateHero();
+        updateMonsters();
+        updateWindArrows();
+        updateEnemyProjectiles();
+        updateIceSpikes();
+      }
+      updateParticles();
+    }
+    function gameLoop(now) {
+      // 捕获每帧异常：保证动画循环不因单次异常而永久停止（卡死），错误输出到控制台便于定位
+      try {
+        const t = typeof now === 'number' ? now : performance.now();
+        if (!__lastFrameTime) __lastFrameTime = t;
+        let delta = t - __lastFrameTime;
+        __lastFrameTime = t;
+        // 切后台/卡顿后时间差可能很大：钳制上限，避免回来时一次性快进爆发
+        if (delta > CFG.frame.maxDeltaMs) delta = CFG.frame.maxDeltaMs;
+        __frameAccumulator += delta;
+        // 按固定步长补跑逻辑（低帧率时每帧多跑几步追时间），步数封顶防止死亡螺旋
+        let steps = 0;
+        while (__frameAccumulator >= FRAME_MS && steps < CFG.frame.maxCatchupSteps) {
+          stepUpdate();
+          __frameAccumulator -= FRAME_MS;
+          steps++;
+          if (DEBUG_NO_DEATH) __frameCount++;
+        }
+        // 积压超过一帧的追赶上限：直接丢弃，不把卡顿转嫁成后续加速
+        if (__frameAccumulator > FRAME_MS * CFG.frame.maxCatchupSteps) __frameAccumulator = 0;
+        draw(); // 渲染跟随屏幕刷新率，逻辑速度恒定
+      } catch (err) {
+        console.error('[gameLoop 异常]', err && (err.stack || err));
+      }
+      animationFrame = requestAnimationFrame(gameLoop);
+    }
+
+    // 启动
+    resizeCanvasDisplay();
+    resetScene();
+    if (animationFrame) cancelAnimationFrame(animationFrame);
+    gameLoop();
+
+    // ------------------- 事件绑定 --------------------
+    document.getElementById('btnReset').addEventListener('click', () => {
+      resetScene();
+    });
+
+    // 注：风箭按钮（btnWindArrow）保留为后续技能切换占位，不绑定蓄力。
+    // 蓄力发射改为：长按画布场景任意处拖动瞄准，松开发射（见 handleAimStart/End）。
+
+    // 虚拟摇杆 + 场景蓄力事件（鼠标+触摸）
+    canvas.addEventListener('mousedown', handleJoystickStart);
+    window.addEventListener('mousemove', handleJoystickMove);
+    window.addEventListener('mouseup', handleJoystickEnd);
+
+    canvas.addEventListener('touchstart', handleJoystickStart, { passive: false });
+    canvas.addEventListener('touchmove', handleJoystickMove, { passive: false });
+    canvas.addEventListener('touchend', handleJoystickEnd);
+    canvas.addEventListener('touchcancel', handleJoystickEnd);
+
+    // 键盘控制（WASD / 方向键）作为备选
+    window.addEventListener('keydown', (e) => {
+      keys[e.key.toLowerCase()] = true;
+    });
+    window.addEventListener('keyup', (e) => {
+      keys[e.key.toLowerCase()] = false;
+    });
+
+    // 每帧更新键盘方向到摇杆（如果摇杆未激活）
+    function updateKeyboardInput() {
+      if (joystick.active) return;
+      let dx = 0, dy = 0;
+      if (keys['w'] || keys['arrowup']) dy -= 1;
+      if (keys['s'] || keys['arrowdown']) dy += 1;
+      if (keys['a'] || keys['arrowleft']) dx -= 1;
+      if (keys['d'] || keys['arrowright']) dx += 1;
+      const mag = Math.hypot(dx, dy);
+      if (mag > 0) {
+        dx /= mag;
+        dy /= mag;
+      }
+      joystick.dx = dx;
+      joystick.dy = dy;
+      // 同步摇杆头位置（视觉反馈）
+      const maxDist = joystick.baseRadius - joystick.knobRadius * 0.3;
+      joystick.knobX = joystick.baseX + dx * maxDist;
+      joystick.knobY = joystick.baseY + dy * maxDist;
+    }
+
+    // 调试模式：暴露内部状态供自动化验证与守恒审计（正常打开不暴露）
+    if (DEBUG_NO_DEATH) {
+      window.__ET = {
+        get frames() { return __frameCount; },
+        get tiles() { return tiles; },
+        get state() {
+          return {
+            gameOver: gameOver,
+            hp: hero ? hero.hp : null,
+            heroX: hero ? hero.x : null,
+            heroY: hero ? hero.y : null,
+            monsters: monsters.length,
+            particles: particles.length,
+            arrows: windArrows.length,
+            bolts: enemyProjectiles.length,
+            spikes: iceSpikes.length,
+          };
+        },
+      };
+    }
+
+    window.addEventListener('beforeunload', () => {
+      if (animationFrame) cancelAnimationFrame(animationFrame);
+    });
+
+  })();
+</script>
+
+
+</body></html>
